@@ -2,7 +2,8 @@
 //!
 //! Registers workspace panel lifecycle commands that call into the
 //! `feature-registry` crate for feature metadata and panel state
-//! tracking.
+//! tracking. Also registers a system-level global shortcut (Alt+Space)
+//! to show/hide the app window via `tauri-plugin-global-shortcut`.
 
 // Prevents additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -11,6 +12,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
+use tauri::Manager;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent};
 
 use serde::Serialize;
 
@@ -181,6 +184,7 @@ fn list_features(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<Feature
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
             open_panel,
@@ -189,6 +193,27 @@ fn main() {
             resize_panel,
             list_features,
         ])
+        .setup(|app| {
+            // Register system-level global shortcut: Alt+Space toggles
+            // the main window visibility.
+            let handle = app.handle().clone();
+            app.global_shortcut().on_shortcut(
+                Shortcut::parse("Alt+Space").unwrap(),
+                move |_app, _shortcut, event| {
+                    if event == ShortcutEvent::Pressed {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = if window.is_visible().unwrap_or(false) {
+                                window.hide()
+                            } else {
+                                window.show()
+                            };
+                        }
+                    }
+                },
+            )?;
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
