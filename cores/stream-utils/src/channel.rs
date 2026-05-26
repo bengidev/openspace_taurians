@@ -59,3 +59,71 @@ impl<T: Serialize + Clone + Send + 'static> Clone for Channel<T> {
 // tauri::ipc::Channel<T> is Send + Sync when T is Send + Sync
 unsafe impl<T: Serialize + Clone + Send + 'static> Send for Channel<T> {}
 unsafe impl<T: Serialize + Clone + Send + 'static> Sync for Channel<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_channel_creation_from_tauri() {
+        let tauri_channel = tauri::ipc::Channel::<String>::new(|_| Ok(()));
+        let channel = Channel::from_tauri(tauri_channel);
+        assert!(channel.id() > 0);
+    }
+
+    #[test]
+    fn test_channel_send() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let s: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+
+        let channel = Channel::from_tauri(tauri_channel);
+        channel.send("hello".to_string()).unwrap();
+        channel.send("world".to_string()).unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0], "hello");
+        assert_eq!(received[1], "world");
+    }
+
+    #[test]
+    fn test_channel_clone() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+
+        let tauri_channel = tauri::ipc::Channel::<i32>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let n: i32 = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(n);
+            }
+            Ok(())
+        });
+
+        let channel = Channel::from_tauri(tauri_channel);
+        let channel_clone = channel.clone();
+
+        channel.send(1).unwrap();
+        channel_clone.send(2).unwrap();
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0], 1);
+        assert_eq!(received[1], 2);
+    }
+
+    #[test]
+    fn test_channel_into_inner() {
+        let tauri_channel = tauri::ipc::Channel::<String>::new(|_| Ok(()));
+        let channel = Channel::from_tauri(tauri_channel);
+        let _inner = channel.into_inner();
+    }
+}
