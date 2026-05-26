@@ -1,0 +1,7 @@
+{
+  "$schema": "../app/gen/schemas/desktop-schema.json",
+  "identifier": "editor-capability",
+  "description": "Capability for the code editor feature",
+  "windows": ["editor"],
+  "permissions": []
+}

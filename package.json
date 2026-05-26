@@ -1,0 +1,9 @@
+{
+  "name": "openspace_taurians",
+  "private": true,
+  "scripts": {
+    "dev": "cd interfaces && npm run dev",
+    "build": "cd interfaces && npm run build",
+    "lint": "cd interfaces && npm run lint"
+  }
+}

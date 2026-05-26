@@ -1,0 +1,7 @@
+{
+  "$schema": "../app/gen/schemas/desktop-schema.json",
+  "identifier": "settings-capability",
+  "description": "Capability for the settings feature",
+  "windows": ["settings"],
+  "permissions": []
+}

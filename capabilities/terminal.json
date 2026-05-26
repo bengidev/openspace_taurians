@@ -1,0 +1,7 @@
+{
+  "$schema": "../app/gen/schemas/desktop-schema.json",
+  "identifier": "terminal-capability",
+  "description": "Capability for the integrated terminal feature",
+  "windows": ["terminal"],
+  "permissions": []
+}
