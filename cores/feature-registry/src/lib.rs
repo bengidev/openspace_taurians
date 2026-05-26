@@ -322,3 +322,244 @@ impl Default for CommandBus {
         Self::new()
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use static_assertions::assert_impl_all;
+
+    // ── Send + Sync guarantees ────────────────────────────────
+
+    #[test]
+    fn feature_metadata_is_send_sync() {
+        assert_impl_all!(FeatureMetadata: Send, Sync);
+    }
+
+    #[test]
+    fn feature_registry_is_send_sync() {
+        assert_impl_all!(FeatureRegistry: Send, Sync);
+    }
+
+    #[test]
+    fn panel_lifecycle_is_send_sync() {
+        assert_impl_all!(PanelLifecycle: Send, Sync);
+    }
+
+    #[test]
+    fn command_bus_is_send_sync() {
+        assert_impl_all!(CommandBus: Send, Sync);
+    }
+
+    // ── FeatureRegistry helpers ───────────────────────────────
+
+    fn make_meta(id: &str) -> FeatureMetadata {
+        FeatureMetadata {
+            id: FeatureId::new(id),
+            name: format!("Feature {id}"),
+            icon: "icon.svg".into(),
+            capability_file: PathBuf::from(format!("{id}.toml")),
+        }
+    }
+
+    // ── FeatureRegistry tests ─────────────────────────────────
+
+    #[test]
+    fn register_and_list() {
+        let mut reg = FeatureRegistry::new();
+        let meta = make_meta("editor");
+        reg.register(meta).unwrap();
+        assert_eq!(reg.list().len(), 1);
+        assert!(reg.get(&FeatureId::new("editor")).is_some());
+    }
+
+    #[test]
+    fn register_duplicate_rejected() {
+        let mut reg = FeatureRegistry::new();
+        reg.register(make_meta("terminal")).unwrap();
+        let result = reg.register(make_meta("terminal"));
+        assert!(matches!(
+            result,
+            Err(RegistryError::DuplicateRegistration(_))
+        ));
+    }
+
+    #[test]
+    fn unregister_existing() {
+        let mut reg = FeatureRegistry::new();
+        reg.register(make_meta("chat")).unwrap();
+        assert!(reg.unregister(&FeatureId::new("chat")).is_ok());
+        assert!(reg.get(&FeatureId::new("chat")).is_none());
+    }
+
+    #[test]
+    fn unregister_nonexistent() {
+        let mut reg = FeatureRegistry::new();
+        let result = reg.unregister(&FeatureId::new("nope"));
+        assert!(matches!(result, Err(RegistryError::NotFound(_))));
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none() {
+        let reg = FeatureRegistry::new();
+        assert!(reg.get(&FeatureId::new("missing")).is_none());
+    }
+
+    #[test]
+    fn registry_new_is_empty() {
+        let reg = FeatureRegistry::new();
+        assert!(reg.list().is_empty());
+    }
+
+    // ── PanelLifecycle tests ──────────────────────────────────
+
+    #[test]
+    fn panel_lifecycle_happy_path() {
+        let mut panel = PanelLifecycle::new();
+        assert_eq!(panel.state(), PanelState::Registered);
+
+        let state = panel.transition(PanelEvent::Open).unwrap();
+        assert_eq!(state, PanelState::Opened);
+        assert_eq!(panel.state(), PanelState::Opened);
+
+        let state = panel.transition(PanelEvent::Focus).unwrap();
+        assert_eq!(state, PanelState::Focused);
+
+        let state = panel.transition(PanelEvent::Close).unwrap();
+        assert_eq!(state, PanelState::Closed);
+    }
+
+    #[test]
+    fn invalid_transition_closed_to_focused() {
+        let mut panel = PanelLifecycle::new();
+        panel.transition(PanelEvent::Open).unwrap();
+        panel.transition(PanelEvent::Focus).unwrap();
+        panel.transition(PanelEvent::Close).unwrap();
+
+        let result = panel.transition(PanelEvent::Focus);
+        let err = result.unwrap_err();
+        assert!(matches!(err.from, PanelState::Closed));
+        assert!(matches!(err.event, PanelEvent::Focus));
+        // state should not have changed
+        assert_eq!(panel.state(), PanelState::Closed);
+    }
+
+    #[test]
+    fn invalid_transition_registered_to_close() {
+        let mut panel = PanelLifecycle::new();
+        let result = panel.transition(PanelEvent::Close);
+        let err = result.unwrap_err();
+        assert!(matches!(err.from, PanelState::Registered));
+        assert!(matches!(err.event, PanelEvent::Close));
+    }
+
+    #[test]
+    fn invalid_transition_opened_to_close() {
+        let mut panel = PanelLifecycle::new();
+        panel.transition(PanelEvent::Open).unwrap();
+
+        let result = panel.transition(PanelEvent::Close);
+        let err = result.unwrap_err();
+        assert!(matches!(err.from, PanelState::Opened));
+        assert!(matches!(err.event, PanelEvent::Close));
+    }
+
+    #[test]
+    fn invalid_transition_registered_to_focus() {
+        let mut panel = PanelLifecycle::new();
+        let result = panel.transition(PanelEvent::Focus);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lifecycle_new_starts_at_registered() {
+        let panel = PanelLifecycle::new();
+        assert_eq!(panel.state(), PanelState::Registered);
+    }
+
+    #[test]
+    fn lifecycle_default_starts_at_registered() {
+        let panel = PanelLifecycle::default();
+        assert_eq!(panel.state(), PanelState::Registered);
+    }
+
+    // ── FeatureMetadata serde round-trip ──────────────────────
+
+    #[test]
+    fn feature_metadata_serde_roundtrip() {
+        let meta = FeatureMetadata {
+            id: FeatureId::new("git-lens"),
+            name: "Git Lens".into(),
+            icon: "git-lens.svg".into(),
+            capability_file: PathBuf::from("capabilities/git-lens.json"),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let roundtripped: FeatureMetadata = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(roundtripped.id, meta.id);
+        assert_eq!(roundtripped.name, meta.name);
+        assert_eq!(roundtripped.icon, meta.icon);
+        assert_eq!(roundtripped.capability_file, meta.capability_file);
+    }
+
+    // ── CommandBus tests ──────────────────────────────────────
+
+    #[derive(Debug, PartialEq)]
+    struct GetName {
+        id: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct NameResult {
+        name: String,
+    }
+
+    #[test]
+    fn command_bus_register_and_send() {
+        let mut bus = CommandBus::new();
+
+        bus.register(|req: GetName| -> NameResult {
+            NameResult {
+                name: format!("name-of-{}", req.id),
+            }
+        });
+
+        let result: NameResult = bus.send(GetName { id: "42".into() }).unwrap();
+        assert_eq!(
+            result,
+            NameResult {
+                name: "name-of-42".into()
+            }
+        );
+    }
+
+    #[test]
+    fn command_bus_no_handler() {
+        let bus = CommandBus::new();
+        let result: Result<String, _> = bus.send::<String, String>("hello".into());
+        assert!(matches!(result, Err(BusError::NoHandler { .. })));
+    }
+
+    #[test]
+    fn command_bus_multiple_handlers() {
+        let mut bus = CommandBus::new();
+
+        bus.register(|req: GetName| -> NameResult {
+            NameResult {
+                name: format!("name-{}", req.id),
+            }
+        });
+
+        #[derive(Debug)]
+        struct GetVersion;
+        bus.register(|_: GetVersion| -> String { "1.0.0".into() });
+
+        let name: NameResult = bus.send(GetName { id: "x".into() }).unwrap();
+        assert_eq!(name.name, "name-x");
+
+        let version: String = bus.send(GetVersion).unwrap();
+        assert_eq!(version, "1.0.0");
+    }
+}
