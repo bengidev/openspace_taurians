@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
 use tauri::Manager;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use serde::Serialize;
 
@@ -197,10 +197,9 @@ fn main() {
             // Register system-level global shortcut: Alt+Space toggles
             // the main window visibility.
             let handle = app.handle().clone();
-            app.global_shortcut().on_shortcut(
-                Shortcut::parse("Alt+Space").unwrap(),
-                move |_app, _shortcut, event| {
-                    if event == ShortcutEvent::Pressed {
+            app.global_shortcut()
+                .on_shortcut("Alt+Space", move |_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
                         if let Some(window) = handle.get_webview_window("main") {
                             let _ = if window.is_visible().unwrap_or(false) {
                                 window.hide()
@@ -209,8 +208,7 @@ fn main() {
                             };
                         }
                     }
-                },
-            )?;
+                })?;
 
             Ok(())
         })
