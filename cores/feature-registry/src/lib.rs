@@ -123,3 +123,84 @@ impl Default for FeatureRegistry {
         Self::new()
     }
 }
+
+// ── PanelLifecycle ───────────────────────────────────────────────
+
+/// States in the panel lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelState {
+    Registered,
+    Opened,
+    Focused,
+    Closed,
+}
+
+/// Events that drive panel state transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelEvent {
+    Open,
+    Focus,
+    Close,
+}
+
+/// Error returned when an invalid panel state transition is
+/// attempted.
+#[derive(Debug, Error)]
+#[error("invalid transition from {from:?} via event {event:?}")]
+pub struct TransitionError {
+    pub from: PanelState,
+    pub event: PanelEvent,
+}
+
+/// Tracks the lifecycle state of a feature panel.
+///
+/// State machine: `Registered → Opened → Focused → Closed`.
+/// Invalid transitions (e.g. `Closed → Focused`) return
+/// [`TransitionError`].
+pub struct PanelLifecycle {
+    state: PanelState,
+}
+
+impl PanelLifecycle {
+    /// Create a new lifecycle tracker starting at
+    /// [`PanelState::Registered`].
+    pub fn new() -> Self {
+        Self {
+            state: PanelState::Registered,
+        }
+    }
+
+    /// Return the current state.
+    pub fn state(&self) -> PanelState {
+        self.state
+    }
+
+    /// Attempt to transition to a new state based on the given event.
+    ///
+    /// Returns the new state on success, or
+    /// [`TransitionError`] if the transition is not valid.
+    pub fn transition(
+        &mut self,
+        event: PanelEvent,
+    ) -> Result<PanelState, TransitionError> {
+        let next = match (self.state, event) {
+            (PanelState::Registered, PanelEvent::Open) => PanelState::Opened,
+            (PanelState::Opened, PanelEvent::Focus) => PanelState::Focused,
+            (PanelState::Focused, PanelEvent::Close) => PanelState::Closed,
+            _ => {
+                return Err(TransitionError {
+                    from: self.state,
+                    event,
+                })
+            }
+        };
+        self.state = next;
+        Ok(self.state)
+    }
+}
+
+impl Default for PanelLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
