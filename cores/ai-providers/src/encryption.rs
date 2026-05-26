@@ -159,12 +159,15 @@ mod tests {
     use std::fs;
 
     fn create_test_dir() -> std::path::PathBuf {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         let dir = std::env::temp_dir().join(format!(
-            "encryption_test_{}",
+            "encryption_test_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            rng.gen::<u64>()
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -286,7 +289,6 @@ mod tests {
     #[test]
     fn test_seed_file_unix_permissions() {
         let test_dir = create_test_dir();
-        let seed_path = test_dir.join(SEED_FILE_NAME);
 
         // Create key
         let _key = get_or_create_key(&test_dir).unwrap();
@@ -295,6 +297,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let seed_path = test_dir.join(SEED_FILE_NAME);
             let metadata = fs::metadata(&seed_path).unwrap();
             let mode = metadata.permissions().mode();
             // Check that file is readable/writable by owner only (0o600)
