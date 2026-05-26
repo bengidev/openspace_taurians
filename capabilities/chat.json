@@ -1,5 +1,5 @@
 {
-  "$schema": "../backend/tauri-app/gen/schemas/desktop-schema.json",
+  "$schema": "../app/gen/schemas/desktop-schema.json",
   "identifier": "chat-capability",
   "description": "Capability for the AI chat feature",
   "windows": ["chat"],

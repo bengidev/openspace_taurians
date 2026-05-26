@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.openspace.taurians",
   "build": {
-    "frontendDist": "../../frontend/out",
+    "frontendDist": "../interfaces/out",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "npm --prefix frontend run dev",
-    "beforeBuildCommand": "npm --prefix frontend run build"
+    "beforeDevCommand": "npm --prefix interfaces run dev",
+    "beforeBuildCommand": "npm --prefix interfaces run build"
   },
   "app": {
     "windows": [

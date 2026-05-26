@@ -1,5 +1,5 @@
 {
-  "$schema": "../backend/tauri-app/gen/schemas/desktop-schema.json",
+  "$schema": "../app/gen/schemas/desktop-schema.json",
   "identifier": "terminal-capability",
   "description": "Capability for the integrated terminal feature",
   "windows": ["terminal"],

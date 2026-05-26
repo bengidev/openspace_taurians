@@ -1,5 +1,5 @@
 {
-  "$schema": "../backend/tauri-app/gen/schemas/desktop-schema.json",
+  "$schema": "../app/gen/schemas/desktop-schema.json",
   "identifier": "git-capability",
   "description": "Capability for the git integration feature",
   "windows": ["git"],
