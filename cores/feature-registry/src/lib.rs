@@ -3,10 +3,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use std::any::{Any, TypeId};
 
 // ── FeatureId ────────────────────────────────────────────────────
 
@@ -179,10 +182,7 @@ impl PanelLifecycle {
     ///
     /// Returns the new state on success, or
     /// [`TransitionError`] if the transition is not valid.
-    pub fn transition(
-        &mut self,
-        event: PanelEvent,
-    ) -> Result<PanelState, TransitionError> {
+    pub fn transition(&mut self, event: PanelEvent) -> Result<PanelState, TransitionError> {
         let next = match (self.state, event) {
             (PanelState::Registered, PanelEvent::Open) => PanelState::Opened,
             (PanelState::Opened, PanelEvent::Focus) => PanelState::Focused,
@@ -200,6 +200,124 @@ impl PanelLifecycle {
 }
 
 impl Default for PanelLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── CommandBus ───────────────────────────────────────────────────
+
+/// Errors returned by [`CommandBus`] operations.
+#[derive(Debug, Error)]
+pub enum BusError {
+    #[error("no handler registered for request type '{request_type}'")]
+    NoHandler { request_type: &'static str },
+
+    #[error("type mismatch for request '{request_type}' → response '{response_type}'")]
+    TypeMismatch {
+        request_type: &'static str,
+        response_type: &'static str,
+    },
+}
+
+/// Type-erased handler that accepts a boxed request and returns a
+/// boxed response.
+trait ErasedHandler: Send + Sync {
+    fn handle(&self, request: Box<dyn Any>) -> Result<Box<dyn Any>, BusError>;
+}
+
+struct HandlerWrapper<Req, Res, F> {
+    handler: F,
+    _phantom: PhantomData<(Req, Res)>,
+}
+
+impl<Req, Res, F> ErasedHandler for HandlerWrapper<Req, Res, F>
+where
+    Req: Send + Sync + 'static,
+    Res: Send + Sync + 'static,
+    F: Fn(Req) -> Res + Send + Sync,
+{
+    fn handle(&self, request: Box<dyn Any>) -> Result<Box<dyn Any>, BusError> {
+        let request = request
+            .downcast::<Req>()
+            .map_err(|_| BusError::TypeMismatch {
+                request_type: std::any::type_name::<Req>(),
+                response_type: std::any::type_name::<Res>(),
+            })?;
+        let response = (self.handler)(*request);
+        Ok(Box::new(response))
+    }
+}
+
+/// Mediator-pattern typed request/response routing between features.
+///
+/// Features register handlers for specific request types, and the bus
+/// routes incoming requests to the matching handler. Type-safe —
+/// mismatched request/response types are caught at compile time.
+///
+/// v1 is synchronous; the design accommodates future async extension
+/// without breaking the type signature.
+pub struct CommandBus {
+    handlers: HashMap<TypeId, Box<dyn ErasedHandler>>,
+}
+
+impl CommandBus {
+    /// Create an empty command bus.
+    pub fn new() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
+    /// Register a handler for requests of type `Req` that produces
+    /// responses of type `Res`.
+    ///
+    /// The handler is type-checked at registration time — the
+    /// request and response types must match what callers of
+    /// [`send`](Self::send) will use.
+    pub fn register<Req, Res, F>(&mut self, handler: F)
+    where
+        Req: Send + Sync + 'static,
+        Res: Send + Sync + 'static,
+        F: Fn(Req) -> Res + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<Req>();
+        let wrapper = HandlerWrapper {
+            handler,
+            _phantom: PhantomData,
+        };
+        self.handlers.insert(type_id, Box::new(wrapper));
+    }
+
+    /// Send a request and receive a typed response.
+    ///
+    /// Returns [`BusError::NoHandler`] if no handler is registered
+    /// for the request type.
+    pub fn send<Req, Res>(&self, request: Req) -> Result<Res, BusError>
+    where
+        Req: 'static,
+        Res: 'static,
+    {
+        let type_id = TypeId::of::<Req>();
+        let handler = self
+            .handlers
+            .get(&type_id)
+            .ok_or_else(|| BusError::NoHandler {
+                request_type: std::any::type_name::<Req>(),
+            })?;
+
+        let response = handler.handle(Box::new(request))?;
+        response
+            .downcast::<Res>()
+            .map(|b| *b)
+            .map_err(|_| BusError::TypeMismatch {
+                request_type: std::any::type_name::<Req>(),
+                response_type: std::any::type_name::<Res>(),
+            })
+    }
+}
+
+impl Default for CommandBus {
     fn default() -> Self {
         Self::new()
     }
