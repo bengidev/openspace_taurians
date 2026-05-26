@@ -1,0 +1,25 @@
+{
+  "workspace": {
+    "sidebar": {
+      "openPanel": "Open panel"
+    },
+    "panel": {
+      "close": "Close panel",
+      "comingSoon": "Coming soon",
+      "noFeature": "No feature specified",
+      "splitHorizontal": "Split horizontally",
+      "splitVertical": "Split vertically"
+    },
+    "empty": {
+      "title": "No panel open",
+      "description": "Select a feature from the sidebar to get started."
+    }
+  },
+  "feature": {
+    "editor": "Editor",
+    "terminal": "Terminal",
+    "chat": "Chat",
+    "git": "Git",
+    "settings": "Settings"
+  }
+}
