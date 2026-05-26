@@ -217,18 +217,18 @@ describe("shortcut system", () => {
           onFire={onFire}
           shortcuts={[
             {
-              id: "cmd-palette",
-              label: "Command Palette",
-              keys: ["Cmd+Shift+P"],
+              id: "toggle-sidebar",
+              label: "Toggle Sidebar",
+              keys: ["Cmd+B"],
               scope: "global",
             },
           ]}
         />,
       );
 
-      pressKeys("Cmd+Shift+P");
+      pressKeys("Cmd+B");
 
-      expect(onFire).toHaveBeenCalledWith("cmd-palette");
+      expect(onFire).toHaveBeenCalledWith("toggle-sidebar");
     });
 
     it("global shortcut fires when activeFeatureId is null", () => {
@@ -239,18 +239,18 @@ describe("shortcut system", () => {
           onFire={onFire}
           shortcuts={[
             {
-              id: "cmd-palette",
-              label: "Command Palette",
-              keys: ["Cmd+Shift+P"],
+              id: "toggle-sidebar",
+              label: "Toggle Sidebar",
+              keys: ["Cmd+B"],
               scope: "global",
             },
           ]}
         />,
       );
 
-      pressKeys("Cmd+Shift+P");
+      pressKeys("Cmd+B");
 
-      expect(onFire).toHaveBeenCalledWith("cmd-palette");
+      expect(onFire).toHaveBeenCalledWith("toggle-sidebar");
     });
   });
 
