@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { Sidebar } from "@/components/Sidebar";
 import { PanelHeader, PanelPlaceholder, ResizeHandle } from "@/components/Panel";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 export default function WorkspaceLayout({
   children,
@@ -61,6 +62,7 @@ export default function WorkspaceLayout({
           >
             {isHorizontal ? "⬍" : "⬌"}
           </button>
+          <ThemeToggle />
         </div>
 
         {/* Panel area */}
