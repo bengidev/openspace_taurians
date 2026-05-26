@@ -87,3 +87,68 @@ pub fn get_or_create_key(data_dir: &Path) -> Result<[u8; KEY_LEN], EncryptionErr
         Ok(key)
     }
 }
+
+/// Encrypt plaintext using AES-256-GCM with a device-local key.
+///
+/// The encrypted output format is: nonce (12 bytes) + ciphertext.
+/// The key is derived from a seed file in the data directory.
+///
+/// # Arguments
+///
+/// * `data_dir` - The directory where the seed file is stored
+/// * `plaintext` - The data to encrypt
+///
+/// # Returns
+///
+/// The encrypted data (nonce + ciphertext), or an error if encryption fails.
+pub fn encrypt(data_dir: &Path, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    let key = get_or_create_key(data_dir)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+
+    // Generate a random nonce
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Encrypt the plaintext
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| EncryptionError::EncryptionFailed)?;
+
+    // Prepend nonce to ciphertext
+    let mut result = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    result.extend_from_slice(&nonce_bytes);
+    result.extend(ciphertext);
+    Ok(result)
+}
+
+/// Decrypt ciphertext using AES-256-GCM with a device-local key.
+///
+/// Expects the input format: nonce (12 bytes) + ciphertext.
+/// The key is derived from a seed file in the data directory.
+///
+/// # Arguments
+///
+/// * `data_dir` - The directory where the seed file is stored
+/// * `ciphertext` - The encrypted data (nonce + ciphertext)
+///
+/// # Returns
+///
+/// The decrypted plaintext, or an error if decryption fails.
+pub fn decrypt(data_dir: &Path, ciphertext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    if ciphertext.len() < NONCE_LEN {
+        return Err(EncryptionError::InvalidCiphertext);
+    }
+
+    let key = get_or_create_key(data_dir)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+
+    // Split nonce and encrypted data
+    let (nonce_bytes, encrypted) = ciphertext.split_at(NONCE_LEN);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    // Decrypt the ciphertext
+    cipher
+        .decrypt(nonce, encrypted)
+        .map_err(|_| EncryptionError::DecryptionFailed)
+}
