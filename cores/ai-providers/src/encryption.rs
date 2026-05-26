@@ -241,4 +241,90 @@ mod tests {
         // Cleanup
         fs::remove_dir_all(&test_dir).ok();
     }
+
+    #[test]
+    fn test_seed_file_creation() {
+        let test_dir = create_test_dir();
+        let seed_path = test_dir.join(SEED_FILE_NAME);
+
+        // Seed file should not exist initially
+        assert!(!seed_path.exists());
+
+        // Get or create key should create the seed file
+        let key1 = get_or_create_key(&test_dir).unwrap();
+
+        // Seed file should now exist
+        assert!(seed_path.exists());
+
+        // Key should be the correct length
+        assert_eq!(key1.len(), KEY_LEN);
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_seed_file_persistence() {
+        let test_dir = create_test_dir();
+        let seed_path = test_dir.join(SEED_FILE_NAME);
+
+        // Create key first time
+        let key1 = get_or_create_key(&test_dir).unwrap();
+
+        // Get key second time should return the same key
+        let key2 = get_or_create_key(&test_dir).unwrap();
+
+        assert_eq!(key1, key2);
+
+        // Seed file should still exist
+        assert!(seed_path.exists());
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_seed_file_unix_permissions() {
+        let test_dir = create_test_dir();
+        let seed_path = test_dir.join(SEED_FILE_NAME);
+
+        // Create key
+        let _key = get_or_create_key(&test_dir).unwrap();
+
+        // Check permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&seed_path).unwrap();
+            let mode = metadata.permissions().mode();
+            // Check that file is readable/writable by owner only (0o600)
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_seed_file_corrupted_regeneration() {
+        let test_dir = create_test_dir();
+        let seed_path = test_dir.join(SEED_FILE_NAME);
+
+        // Create a corrupted seed file (wrong length)
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(&seed_path, vec![0u8; 10]).unwrap();
+
+        // Get or create key should regenerate the seed file
+        let key1 = get_or_create_key(&test_dir).unwrap();
+
+        // Key should be the correct length
+        assert_eq!(key1.len(), KEY_LEN);
+
+        // Seed file should now have correct length
+        let seed_data = fs::read(&seed_path).unwrap();
+        assert_eq!(seed_data.len(), KEY_LEN);
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
 }
