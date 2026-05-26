@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CommandAction, ShortcutEntry, ShortcutScope } from "@/lib/shortcuts";
+import type { CommandAction, ShortcutEntry } from "@/lib/shortcuts";
 
 // ── Context shape ───────────────────────────────────────────────────
 
@@ -85,17 +85,17 @@ export function ShortcutProvider({
   builtInActions?: CommandAction[];
 }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcuts, setShortcuts] = useState<ReadonlyMap<string, ShortcutEntry>>(new Map());
   const shortcutsRef = useRef<Map<string, ShortcutEntry>>(new Map());
-  const [, forceRender] = useState(0);
 
   const register = useCallback((entry: ShortcutEntry) => {
     shortcutsRef.current.set(entry.id, entry);
-    forceRender((n) => n + 1);
+    setShortcuts(new Map(shortcutsRef.current));
   }, []);
 
   const unregister = useCallback((id: string) => {
     shortcutsRef.current.delete(id);
-    forceRender((n) => n + 1);
+    setShortcuts(new Map(shortcutsRef.current));
   }, []);
 
   // Keyboard event handler
@@ -138,12 +138,12 @@ export function ShortcutProvider({
     () => ({
       register,
       unregister,
-      shortcuts: shortcutsRef.current,
+      shortcuts,
       setPaletteOpen,
       paletteOpen,
       activeFeatureId,
     }),
-    [register, unregister, paletteOpen, activeFeatureId],
+    [register, unregister, shortcuts, paletteOpen, activeFeatureId],
   );
 
   return (
