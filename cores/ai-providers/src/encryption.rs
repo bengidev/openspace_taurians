@@ -35,3 +35,55 @@ pub enum EncryptionError {
     #[error("Invalid ciphertext: too short")]
     InvalidCiphertext,
 }
+
+/// Generate cryptographically secure random bytes.
+fn generate_random_bytes() -> [u8; KEY_LEN] {
+    let mut buf = [0u8; KEY_LEN];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf
+}
+
+/// Load or create the encryption key from a seed file in the given data directory.
+///
+/// If the seed file doesn't exist, it will be created with a new random key.
+/// On Unix systems, the file is created with restrictive permissions (0o600).
+///
+/// # Arguments
+///
+/// * `data_dir` - The directory where the seed file should be stored
+///
+/// # Returns
+///
+/// The 32-byte encryption key, or an error if I/O operations fail.
+pub fn get_or_create_key(data_dir: &Path) -> Result<[u8; KEY_LEN], EncryptionError> {
+    // Ensure the data directory exists
+    std::fs::create_dir_all(data_dir)?;
+
+    let seed_path = data_dir.join(SEED_FILE_NAME);
+
+    if seed_path.exists() {
+        let bytes = std::fs::read(&seed_path)?;
+        if bytes.len() == KEY_LEN {
+            let mut key = [0u8; KEY_LEN];
+            key.copy_from_slice(&bytes);
+            Ok(key)
+        } else {
+            // Regenerate if seed file is corrupted
+            let key = generate_random_bytes();
+            std::fs::write(&seed_path, &key)?;
+            Ok(key)
+        }
+    } else {
+        let key = generate_random_bytes();
+        std::fs::write(&seed_path, &key)?;
+
+        // Set restrictive permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&seed_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        Ok(key)
+    }
+}
