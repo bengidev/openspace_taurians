@@ -1,5 +1,10 @@
 //! Tauri application binary — desktop shell entry point.
-//! Stub; Tauri init and window setup in later commits.
+
+// Prevents additional console window on Windows in release.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
-    println!("OpenSpace Taurians — Tauri desktop shell");
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
