@@ -152,3 +152,93 @@ pub fn decrypt(data_dir: &Path, ciphertext: &[u8]) -> Result<Vec<u8>, Encryption
         .decrypt(nonce, encrypted)
         .map_err(|_| EncryptionError::DecryptionFailed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn create_test_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "encryption_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_round_trip() {
+        let test_dir = create_test_dir();
+        let plaintext = b"Hello, World!";
+
+        let encrypted = encrypt(&test_dir, plaintext).unwrap();
+        let decrypted = decrypt(&test_dir, &encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_empty_data() {
+        let test_dir = create_test_dir();
+        let plaintext = b"";
+
+        let encrypted = encrypt(&test_dir, plaintext).unwrap();
+        let decrypted = decrypt(&test_dir, &encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_large_data() {
+        let test_dir = create_test_dir();
+        let plaintext = vec![42u8; 10_000];
+
+        let encrypted = encrypt(&test_dir, &plaintext).unwrap();
+        let decrypted = decrypt(&test_dir, &encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_decrypt_invalid_ciphertext() {
+        let test_dir = create_test_dir();
+        let short_ciphertext = vec![0u8; 5]; // Too short
+
+        let result = decrypt(&test_dir, &short_ciphertext);
+        assert!(matches!(result, Err(EncryptionError::InvalidCiphertext)));
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[test]
+    fn test_decrypt_tampered_ciphertext() {
+        let test_dir = create_test_dir();
+        let plaintext = b"Secret data";
+
+        let mut encrypted = encrypt(&test_dir, plaintext).unwrap();
+        // Tamper with the ciphertext
+        if let Some(byte) = encrypted.last_mut() {
+            *byte ^= 0xFF;
+        }
+
+        let result = decrypt(&test_dir, &encrypted);
+        assert!(matches!(result, Err(EncryptionError::DecryptionFailed)));
+
+        // Cleanup
+        fs::remove_dir_all(&test_dir).ok();
+    }
+}
