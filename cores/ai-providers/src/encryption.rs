@@ -70,12 +70,12 @@ pub fn get_or_create_key(data_dir: &Path) -> Result<[u8; KEY_LEN], EncryptionErr
         } else {
             // Regenerate if seed file is corrupted
             let key = generate_random_bytes();
-            std::fs::write(&seed_path, &key)?;
+            std::fs::write(&seed_path, key)?;
             Ok(key)
         }
     } else {
         let key = generate_random_bytes();
-        std::fs::write(&seed_path, &key)?;
+        std::fs::write(&seed_path, key)?;
 
         // Set restrictive permissions on Unix
         #[cfg(unix)]
