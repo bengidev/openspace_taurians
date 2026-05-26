@@ -89,7 +89,7 @@ export function useMonacoTheme(
   useEffect(() => {
     // Only apply if Monaco is loaded and an editor instance exists.
     const monaco = (globalThis as Record<string, unknown>).monaco as
-      | Record<string, unknown>
+      | { editor?: { defineTheme?: (name: string, def: unknown) => void; setTheme?: (name: string) => void } }
       | undefined;
     if (!monaco || !editorRef.current) return;
 
