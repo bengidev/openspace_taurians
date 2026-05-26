@@ -1,0 +1,9 @@
+{
+  "$schema": "../app/gen/schemas/desktop-schema.json",
+  "identifier": "global-shortcut-capability",
+  "description": "Capability for system-level global keyboard shortcuts (Alt+Space toggles app window)",
+  "windows": ["main"],
+  "permissions": [
+    "global-shortcut:default"
+  ]
+}
