@@ -11,11 +11,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use ai_providers::{
+    ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore, UpdateProviderConfig,
+};
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
-use tauri::Manager;
+use tauri::{Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ── Panel info (returned to frontend) ─────────────────────────────
 
@@ -71,6 +74,68 @@ impl AppState {
         let id = format!("panel-{}", self.next_id);
         self.next_id += 1;
         id
+    }
+}
+
+struct ProviderState {
+    store: Mutex<ProviderStore>,
+}
+
+impl ProviderState {
+    fn new<R: Runtime>(app: &tauri::App<R>) -> Result<Self, String> {
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
+        let database_path = data_dir.join("openspace.sqlite3");
+
+        Ok(Self {
+            store: Mutex::new(
+                ProviderStore::open(database_path, data_dir)
+                    .map_err(|e| format!("failed to open provider store: {e}"))?,
+            ),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderWritePayload {
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    auth_header_name: Option<String>,
+    auth_header_value_prefix: Option<String>,
+    models: Vec<ModelInfo>,
+    request_body_template: serde_json::Value,
+    response_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderResponse {
+    id: i64,
+    name: String,
+    base_url: String,
+    api_key_redacted: String,
+    auth_header_name: String,
+    auth_header_value_prefix: String,
+    models: Vec<ModelInfo>,
+    request_body_template: serde_json::Value,
+    response_path: String,
+}
+
+impl From<ProviderConfig> for ProviderResponse {
+    fn from(provider: ProviderConfig) -> Self {
+        Self {
+            id: provider.id,
+            name: provider.name,
+            base_url: provider.base_url,
+            api_key_redacted: "[REDACTED]".to_string(),
+            auth_header_name: provider.auth_header_name,
+            auth_header_value_prefix: provider.auth_header_value_prefix,
+            models: provider.models,
+            request_body_template: provider.request_body_template,
+            response_path: provider.response_path,
+        }
     }
 }
 
@@ -180,6 +245,81 @@ fn list_features(state: tauri::State<'_, Mutex<AppState>>) -> Result<Vec<Feature
     Ok(app.registry.list().into_iter().cloned().collect())
 }
 
+#[tauri::command]
+fn provider_create(
+    payload: ProviderWritePayload,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<i64, String> {
+    let api_key = payload
+        .api_key
+        .ok_or_else(|| "api_key is required when creating a provider".to_string())?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+
+    store
+        .create(NewProviderConfig {
+            name: payload.name,
+            base_url: payload.base_url,
+            api_key,
+            auth_header_name: payload.auth_header_name,
+            auth_header_value_prefix: payload.auth_header_value_prefix,
+            models: payload.models,
+            request_body_template: payload.request_body_template,
+            response_path: payload.response_path,
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn provider_get(
+    id: i64,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<Option<ProviderResponse>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .get(id)
+        .map(|provider| provider.map(Into::into))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn provider_list(state: tauri::State<'_, ProviderState>) -> Result<Vec<ProviderResponse>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .list()
+        .map(|providers| providers.into_iter().map(Into::into).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn provider_update(
+    id: i64,
+    payload: ProviderWritePayload,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<bool, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .update(
+            id,
+            UpdateProviderConfig {
+                name: payload.name,
+                base_url: payload.base_url,
+                api_key: payload.api_key,
+                auth_header_name: payload.auth_header_name,
+                auth_header_value_prefix: payload.auth_header_value_prefix,
+                models: payload.models,
+                request_body_template: payload.request_body_template,
+                response_path: payload.response_path,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn provider_delete(id: i64, state: tauri::State<'_, ProviderState>) -> Result<bool, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.delete(id).map_err(|e| e.to_string())
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 fn main() {
@@ -192,8 +332,14 @@ fn main() {
             focus_panel,
             resize_panel,
             list_features,
+            provider_create,
+            provider_get,
+            provider_list,
+            provider_update,
+            provider_delete,
         ])
         .setup(|app| {
+            app.manage(ProviderState::new(app)?);
             // Register system-level global shortcut: Alt+Space toggles
             // the main window visibility.
             let handle = app.handle().clone();

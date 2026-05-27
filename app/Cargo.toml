@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ai-providers = { path = "../cores/ai-providers" }
 feature-registry = { path = "../cores/feature-registry" }
 tauri = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"
