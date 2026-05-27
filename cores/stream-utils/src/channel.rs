@@ -36,7 +36,23 @@ impl<T: Serialize + Clone + Send + 'static> Channel<T> {
             .map_err(|e| ChannelError::SendFailed(e.to_string()))
     }
 
-    /// Get the channel ID.
+    /// Get the channel ID assigned by Tauri.
+    ///
+    /// Useful for correlating log entries or tracing spans on either side of
+    /// the IPC boundary when several streams are in flight at once.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use stream_utils::Channel;
+    ///
+    /// #[tauri::command]
+    /// async fn my_streaming_command(on_event: tauri::ipc::Channel<String>) {
+    ///     let channel = Channel::from_tauri(on_event);
+    ///     tracing::info!(channel_id = channel.id(), "stream started");
+    ///     // …
+    /// }
+    /// ```
     pub fn id(&self) -> u32 {
         self.inner.id()
     }

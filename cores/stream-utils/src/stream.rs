@@ -54,6 +54,13 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
+    // Helper: build a `Channel<T>` that pushes each received item into
+    // `received`, deserialising it from Tauri's JSON-encoded callback body.
+    //
+    // The extra `DeserializeOwned` bound here is purely a *test* concern: the
+    // production `Channel<T>` API only requires `Serialize` because it never
+    // round-trips items back from JSON. Tests need to inspect what the
+    // callback saw, so they pay the deserialisation cost.
     fn make_test_channel<T>(
         received: Arc<Mutex<Vec<T>>>,
     ) -> Channel<T>

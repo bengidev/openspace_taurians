@@ -24,6 +24,19 @@ export interface InvokeStreamOptions {
  * This function creates a Channel, passes it to the Tauri command,
  * and returns an AsyncIterable that yields each item as it arrives.
  *
+ * ## Cancellation semantics
+ *
+ * Cancellation is **unidirectional**: dropping the Rust-side future (e.g. via
+ * `into_channel_stream`) stops the Rust → JS flow, but breaking out of the
+ * `for await` loop on the JS side does **not** signal the Rust command to
+ * stop producing. The Rust side will keep running until it finishes naturally
+ * or its own `Channel::send` fails (which typically requires the webview to
+ * go away).
+ *
+ * If you need consumer-initiated cancellation, pass an explicit cancel token
+ * (or an `AbortSignal` you wire through `args`) and have the Rust command
+ * check it between yields.
+ *
  * @param command - The Tauri command name to invoke
  * @param args - Arguments to pass to the command (excluding the channel)
  * @param options - Optional configuration
