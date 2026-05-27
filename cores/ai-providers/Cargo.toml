@@ -16,5 +16,6 @@ stream-utils = { path = "../stream-utils" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+tauri = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"

@@ -429,6 +429,9 @@ fn data_lines(event: &str) -> Vec<&str> {
 mod tests {
     use super::*;
     use crate::{ModelInfo, ProviderConfig};
+    use std::sync::{Arc, Mutex};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn config(response_path: &str) -> ProviderConfig {
         ProviderConfig {
@@ -530,5 +533,99 @@ mod tests {
 
         assert!(done);
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_request_response_cycle_uses_configured_auth_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "mocked response"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        provider_config.auth_header_name = "X-API-Key".to_string();
+        provider_config.auth_header_value_prefix = "Token ".to_string();
+        let provider = AiProvider::with_api_key(provider_config, "secret-key".to_string());
+
+        let content = provider
+            .chat_once(
+                "gpt-4o-mini",
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                0.7,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(content, "mocked response");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            request.headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "Token secret-key"
+        );
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["model"], "gpt-4o-mini");
+        assert_eq!(body["messages"][0]["content"], "hello");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["temperature"], 0.7);
+    }
+
+    #[tokio::test]
+    async fn streaming_response_pushes_tokens_through_channel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].delta.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "secret-key".to_string());
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        provider
+            .chat_stream(
+                "gpt-4o-mini",
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                0.7,
+                &channel,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(*received.lock().unwrap(), vec!["hel".to_string(), "lo".to_string()]);
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["stream"], true);
     }
 }

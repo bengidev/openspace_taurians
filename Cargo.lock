@@ -76,6 +76,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stream-utils",
+ "tauri",
  "thiserror 2.0.18",
  "tokio",
  "wiremock",
