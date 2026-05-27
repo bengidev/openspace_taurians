@@ -19,6 +19,9 @@ pub enum ProviderStoreError {
 
     #[error("encryption error: {0}")]
     Encryption(#[from] EncryptionError),
+
+    #[error("adapter error: {0}")]
+    Adapter(String),
 }
 
 /// Fields accepted when creating a provider.
@@ -260,6 +263,17 @@ impl ProviderStore {
     /// Decrypt an encrypted provider API key for internal callers/tests.
     pub fn decrypt_api_key(&self, provider: &ProviderConfig) -> Result<String, ProviderStoreError> {
         provider.decrypt_api_key(&self.encryptor).map_err(Into::into)
+    }
+
+    /// Build a generic HTTP adapter for a persisted provider.
+    pub fn ai_provider(&self, id: i64) -> Result<Option<crate::AiProvider>, ProviderStoreError> {
+        self.get(id)?
+            .map(|provider| crate::AiProvider::new(provider, &self.encryptor))
+            .transpose()
+            .map_err(|error| match error {
+                crate::AiProviderError::Encryption(error) => ProviderStoreError::Encryption(error),
+                other => ProviderStoreError::Adapter(other.to_string()),
+            })
     }
 
     fn provider_from_row(&self, row: &rusqlite::Row<'_>) -> Result<ProviderConfig, rusqlite::Error> {

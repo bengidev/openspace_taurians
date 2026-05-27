@@ -2436,6 +2436,7 @@ dependencies = [
  "feature-registry",
  "serde",
  "serde_json",
+ "stream-utils",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
