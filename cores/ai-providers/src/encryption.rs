@@ -116,10 +116,7 @@ fn create_seed_file(path: &Path, key: &[u8; KEY_LEN]) -> Result<(), EncryptionEr
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(key)?;
     Ok(())
 }

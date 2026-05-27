@@ -43,7 +43,10 @@ pub enum AiProviderError {
     InvalidHeaderValue { name: String, reason: String },
 
     #[error("provider returned HTTP {status}: {body}")]
-    HttpStatus { status: reqwest::StatusCode, body: String },
+    HttpStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
@@ -214,17 +217,19 @@ impl AiProvider {
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, AiProviderError> {
-        let name = HeaderName::from_bytes(self.config.auth_header_name.as_bytes()).map_err(|e| {
-            AiProviderError::InvalidHeaderName {
+        let name =
+            HeaderName::from_bytes(self.config.auth_header_name.as_bytes()).map_err(|e| {
+                AiProviderError::InvalidHeaderName {
+                    name: self.config.auth_header_name.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+        let value = format!("{}{}", self.config.auth_header_value_prefix, self.api_key);
+        let value =
+            HeaderValue::from_str(&value).map_err(|e| AiProviderError::InvalidHeaderValue {
                 name: self.config.auth_header_name.clone(),
                 reason: e.to_string(),
-            }
-        })?;
-        let value = format!("{}{}", self.config.auth_header_value_prefix, self.api_key);
-        let value = HeaderValue::from_str(&value).map_err(|e| AiProviderError::InvalidHeaderValue {
-            name: self.config.auth_header_name.clone(),
-            reason: e.to_string(),
-        })?;
+            })?;
 
         let mut headers = HeaderMap::new();
         headers.insert(name, value);
@@ -236,9 +241,8 @@ impl AiProvider {
         match extract_response_content(&json, &self.config.response_path) {
             Ok(token) if !token.is_empty() => Ok(Some(token.to_string())),
             Ok(_) => Ok(None),
-            Err(AiProviderError::ResponsePath { .. }) | Err(AiProviderError::ResponsePathNotString { .. }) => {
-                Ok(None)
-            }
+            Err(AiProviderError::ResponsePath { .. })
+            | Err(AiProviderError::ResponsePathNotString { .. }) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -330,18 +334,22 @@ pub fn extract_response_content<'a>(
         .trim_start_matches('.');
 
     if trimmed.is_empty() {
-        return current.as_str().ok_or_else(|| AiProviderError::ResponsePathNotString {
-            path: response_path.to_string(),
-        });
+        return current
+            .as_str()
+            .ok_or_else(|| AiProviderError::ResponsePathNotString {
+                path: response_path.to_string(),
+            });
     }
 
     for segment in trimmed.split('.') {
         current = apply_path_segment(current, response_path, segment)?;
     }
 
-    current.as_str().ok_or_else(|| AiProviderError::ResponsePathNotString {
-        path: response_path.to_string(),
-    })
+    current
+        .as_str()
+        .ok_or_else(|| AiProviderError::ResponsePathNotString {
+            path: response_path.to_string(),
+        })
 }
 
 fn apply_path_segment<'a>(
@@ -390,7 +398,10 @@ fn path_error(path: &str, segment: &str) -> AiProviderError {
     }
 }
 
-fn drain_complete_sse_events<F>(pending: &mut String, mut on_event: F) -> Result<bool, AiProviderError>
+fn drain_complete_sse_events<F>(
+    pending: &mut String,
+    mut on_event: F,
+) -> Result<bool, AiProviderError>
 where
     F: FnMut(&str) -> Result<(), AiProviderError>,
 {
@@ -623,7 +634,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(*received.lock().unwrap(), vec!["hel".to_string(), "lo".to_string()]);
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec!["hel".to_string(), "lo".to_string()]
+        );
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["stream"], true);

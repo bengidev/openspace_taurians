@@ -50,10 +50,7 @@ impl fmt::Debug for ProviderConfig {
             .field("base_url", &self.base_url)
             .field("api_key_encrypted", &"[REDACTED]")
             .field("auth_header_name", &self.auth_header_name)
-            .field(
-                "auth_header_value_prefix",
-                &self.auth_header_value_prefix,
-            )
+            .field("auth_header_value_prefix", &self.auth_header_value_prefix)
             .field("models", &self.models)
             .field("request_body_template", &self.request_body_template)
             .field("response_path", &self.response_path)

@@ -61,15 +61,14 @@ mod tests {
     // production `Channel<T>` API only requires `Serialize` because it never
     // round-trips items back from JSON. Tests need to inspect what the
     // callback saw, so they pay the deserialisation cost.
-    fn make_test_channel<T>(
-        received: Arc<Mutex<Vec<T>>>,
-    ) -> Channel<T>
+    fn make_test_channel<T>(received: Arc<Mutex<Vec<T>>>) -> Channel<T>
     where
         T: Serialize + serde::de::DeserializeOwned + Clone + Send + 'static,
     {
         let tauri_channel = tauri::ipc::Channel::<T>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let item: T = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                let item: T =
+                    serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received.lock().unwrap().push(item);
             }
             Ok(())
@@ -86,7 +85,10 @@ mod tests {
         into_channel_stream(stream, &channel).await.unwrap();
 
         let received = received.lock().unwrap();
-        assert_eq!(*received, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            *received,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -125,7 +127,8 @@ mod tests {
             // Simulate slow processing
             std::thread::sleep(Duration::from_millis(1));
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                let n: i32 =
+                    serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(n);
             }
             Ok(())
@@ -157,7 +160,10 @@ mod tests {
 
         // Give it a tiny bit of time then drop the future
         let result = timeout(Duration::from_millis(50), future).await;
-        assert!(result.is_err(), "future should have been cancelled by timeout");
+        assert!(
+            result.is_err(),
+            "future should have been cancelled by timeout"
+        );
 
         // Some items may have been sent before cancellation
         let received = received.lock().unwrap();
@@ -198,7 +204,8 @@ mod tests {
                 return Err(tauri::Error::WebviewNotFound);
             }
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                let n: i32 =
+                    serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(n);
             }
             Ok(())
@@ -217,7 +224,11 @@ mod tests {
 
         // Only item 1 should have been received; item 2 failed and item 3 was never polled
         let received = received.lock().unwrap();
-        assert_eq!(received.len(), 1, "only the first item should have been received");
+        assert_eq!(
+            received.len(),
+            1,
+            "only the first item should have been received"
+        );
         assert_eq!(received[0], 1);
     }
 
@@ -243,8 +254,14 @@ mod tests {
 
         let r1 = received1.lock().unwrap();
         let r2 = received2.lock().unwrap();
-        assert_eq!(*r1, vec!["a1".to_string(), "a2".to_string(), "a3".to_string()]);
-        assert_eq!(*r2, vec!["b1".to_string(), "b2".to_string(), "b3".to_string()]);
+        assert_eq!(
+            *r1,
+            vec!["a1".to_string(), "a2".to_string(), "a3".to_string()]
+        );
+        assert_eq!(
+            *r2,
+            vec!["b1".to_string(), "b2".to_string(), "b3".to_string()]
+        );
     }
 
     #[tokio::test]
