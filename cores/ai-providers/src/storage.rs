@@ -19,6 +19,9 @@ pub enum ProviderStoreError {
 
     #[error("encryption error: {0}")]
     Encryption(#[from] EncryptionError),
+
+    #[error("adapter error: {0}")]
+    Adapter(String),
 }
 
 /// Fields accepted when creating a provider.
@@ -55,7 +58,10 @@ pub struct ProviderStore {
 
 impl ProviderStore {
     /// Open a provider store at `database_path` and create required schema.
-    pub fn open(database_path: impl AsRef<Path>, data_dir: impl AsRef<Path>) -> Result<Self, ProviderStoreError> {
+    pub fn open(
+        database_path: impl AsRef<Path>,
+        data_dir: impl AsRef<Path>,
+    ) -> Result<Self, ProviderStoreError> {
         if let Some(parent) = database_path.as_ref().parent() {
             std::fs::create_dir_all(parent).map_err(EncryptionError::Io)?;
         }
@@ -259,10 +265,26 @@ impl ProviderStore {
 
     /// Decrypt an encrypted provider API key for internal callers/tests.
     pub fn decrypt_api_key(&self, provider: &ProviderConfig) -> Result<String, ProviderStoreError> {
-        provider.decrypt_api_key(&self.encryptor).map_err(Into::into)
+        provider
+            .decrypt_api_key(&self.encryptor)
+            .map_err(Into::into)
     }
 
-    fn provider_from_row(&self, row: &rusqlite::Row<'_>) -> Result<ProviderConfig, rusqlite::Error> {
+    /// Build a generic HTTP adapter for a persisted provider.
+    pub fn ai_provider(&self, id: i64) -> Result<Option<crate::AiProvider>, ProviderStoreError> {
+        self.get(id)?
+            .map(|provider| crate::AiProvider::new(provider, &self.encryptor))
+            .transpose()
+            .map_err(|error| match error {
+                crate::AiProviderError::Encryption(error) => ProviderStoreError::Encryption(error),
+                other => ProviderStoreError::Adapter(other.to_string()),
+            })
+    }
+
+    fn provider_from_row(
+        &self,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<ProviderConfig, rusqlite::Error> {
         let models_json: String = row.get(6)?;
         let request_body_template_json: String = row.get(7)?;
 
@@ -283,18 +305,17 @@ impl ProviderStore {
         })
     }
 
-    fn ensure_decryptable(&self, provider: ProviderConfig) -> Result<ProviderConfig, ProviderStoreError> {
+    fn ensure_decryptable(
+        &self,
+        provider: ProviderConfig,
+    ) -> Result<ProviderConfig, ProviderStoreError> {
         let _ = self.decrypt_api_key(&provider)?;
         Ok(provider)
     }
 }
 
 fn json_to_sql_error(error: serde_json::Error) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        0,
-        rusqlite::types::Type::Text,
-        Box::new(error),
-    )
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }
 
 #[cfg(test)]

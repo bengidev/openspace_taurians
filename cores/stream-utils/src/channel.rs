@@ -93,7 +93,8 @@ mod tests {
 
         let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let s: String = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                let s: String =
+                    serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(s);
             }
             Ok(())
@@ -116,7 +117,8 @@ mod tests {
 
         let tauri_channel = tauri::ipc::Channel::<i32>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                let n: i32 =
+                    serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(n);
             }
             Ok(())

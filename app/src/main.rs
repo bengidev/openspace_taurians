@@ -12,9 +12,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ai_providers::{
-    ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore, UpdateProviderConfig,
+    ChatMessage, ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore, ProviderTestResult,
+    UpdateProviderConfig,
 };
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
+use stream_utils::Channel;
 use tauri::{Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -108,6 +110,14 @@ struct ProviderWritePayload {
     models: Vec<ModelInfo>,
     request_body_template: serde_json::Value,
     response_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderChatPayload {
+    provider_id: i64,
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,6 +330,48 @@ fn provider_delete(id: i64, state: tauri::State<'_, ProviderState>) -> Result<bo
     store.delete(id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn provider_test_connection(
+    provider_id: i64,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<ProviderTestResult, String> {
+    let provider = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .ai_provider(provider_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("provider '{provider_id}' not found"))?
+    };
+
+    Ok(provider.test_connection().await)
+}
+
+#[tauri::command]
+async fn provider_chat_stream(
+    payload: ProviderChatPayload,
+    on_token: tauri::ipc::Channel<String>,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<(), String> {
+    let provider = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .ai_provider(payload.provider_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("provider '{}' not found", payload.provider_id))?
+    };
+    let channel = Channel::from_tauri(on_token);
+
+    provider
+        .chat_stream(
+            &payload.model,
+            &payload.messages,
+            payload.temperature.unwrap_or(0.7),
+            &channel,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 fn main() {
@@ -337,6 +389,8 @@ fn main() {
             provider_list,
             provider_update,
             provider_delete,
+            provider_test_connection,
+            provider_chat_stream,
         ])
         .setup(|app| {
             app.manage(ProviderState::new(app)?);
