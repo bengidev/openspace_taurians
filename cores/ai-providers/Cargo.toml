@@ -6,8 +6,15 @@ license.workspace = true
 
 [dependencies]
 aes-gcm = "0.10"
+futures = { workspace = true }
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+stream-utils = { path = "../stream-utils" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
