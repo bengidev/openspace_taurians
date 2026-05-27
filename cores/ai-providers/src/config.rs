@@ -1,181 +1,174 @@
 //! Configuration structures for AI providers.
 //!
-//! [`ProviderConfig`] supports encrypting its `api_key` at rest via the
-//! [`crate::encryption::Encryptor`] API. The `api_key` field is redacted in
-//! `Debug` output.
+//! [`ProviderConfig`] stores all provider metadata needed to call an LLM API.
+//! The `api_key_encrypted` field is intentionally redacted in `Debug` output.
 
-use crate::encryption::Encryptor;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Configuration for an AI provider.
-///
-/// The `api_key` field is stored in memory as plaintext but can be encrypted
-/// for persistence via [`ProviderConfig::encrypt_api_key`] and decrypted via
-/// [`ProviderConfig::decrypt_api_key`].
-#[derive(Clone)]
-pub struct ProviderConfig {
-    /// The name of the provider (e.g., "openai", "anthropic").
+/// Metadata for one model exposed by a provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
     pub name: String,
-    /// The base URL for the provider's API.
+    pub context_window: u32,
+}
+
+/// Configuration for an AI provider.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub id: i64,
+    pub name: String,
     pub base_url: String,
-    /// The API key for authentication (redacted in Debug output).
-    pub api_key: String,
-    /// The model identifier to use.
-    pub model: String,
+    pub api_key_encrypted: Vec<u8>,
+    #[serde(default = "default_auth_header_name")]
+    pub auth_header_name: String,
+    #[serde(default = "default_auth_header_value_prefix")]
+    pub auth_header_value_prefix: String,
+    pub models: Vec<ModelInfo>,
+    pub request_body_template: serde_json::Value,
+    pub response_path: String,
 }
 
 impl ProviderConfig {
-    /// Encrypt the `api_key` field using the given encryptor.
-    ///
-    /// Returns the encrypted key (nonce + ciphertext) suitable for storage.
-    /// The plaintext `api_key` remains in memory.
-    pub fn encrypt_api_key(&self, encryptor: &Encryptor) -> Result<Vec<u8>, crate::encryption::EncryptionError> {
-        encryptor.encrypt(self.api_key.as_bytes())
-    }
-
-    /// Replace the `api_key` field by decrypting `encrypted_key` with the given encryptor.
-    ///
-    /// The decrypted key is stored in `self.api_key` as a plaintext [`String`].
-    pub fn decrypt_api_key(&mut self, encryptor: &Encryptor, encrypted_key: &[u8]) -> Result<(), crate::encryption::EncryptionError> {
-        let key_bytes = encryptor.decrypt(encrypted_key)?;
-        self.api_key = String::from_utf8(key_bytes).map_err(|_| crate::encryption::EncryptionError::DecryptionFailed)?;
-        Ok(())
+    /// Decrypt the provider's encrypted API key for in-memory use by callers.
+    pub fn decrypt_api_key(
+        &self,
+        encryptor: &crate::encryption::Encryptor,
+    ) -> Result<String, crate::encryption::EncryptionError> {
+        let key_bytes = encryptor.decrypt(&self.api_key_encrypted)?;
+        String::from_utf8(key_bytes)
+            .map_err(|_| crate::encryption::EncryptionError::DecryptionFailed)
     }
 }
 
 impl fmt::Debug for ProviderConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderConfig")
+            .field("id", &self.id)
             .field("name", &self.name)
             .field("base_url", &self.base_url)
-            .field("api_key", &"[REDACTED]")
-            .field("model", &self.model)
+            .field("api_key_encrypted", &"[REDACTED]")
+            .field("auth_header_name", &self.auth_header_name)
+            .field(
+                "auth_header_value_prefix",
+                &self.auth_header_value_prefix,
+            )
+            .field("models", &self.models)
+            .field("request_body_template", &self.request_body_template)
+            .field("response_path", &self.response_path)
             .finish()
     }
+}
+
+pub fn default_auth_header_name() -> String {
+    "Authorization".to_string()
+}
+
+pub fn default_auth_header_value_prefix() -> String {
+    "Bearer ".to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encryption::Encryptor;
 
-    struct TestDir {
-        path: std::path::PathBuf,
-    }
-
-    impl TestDir {
-        fn new() -> Self {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let dir = std::env::temp_dir().join(format!(
-                "config_test_{}_{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                rng.gen::<u64>()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self { path: dir }
+    #[test]
+    fn provider_config_deserializes_valid_json_with_defaults() {
+        let json = r#"
+        {
+          "id": 1,
+          "name": "OpenAI",
+          "base_url": "https://api.openai.com/v1",
+          "api_key_encrypted": [1, 2, 3],
+          "models": [
+            {"id": "gpt-4o", "name": "GPT-4o", "context_window": 128000}
+          ],
+          "request_body_template": {
+            "model": "{model}",
+            "messages": "{messages}",
+            "stream": "{stream}",
+            "temperature": "{temperature}"
+          },
+          "response_path": "choices[0].message.content"
         }
+        "#;
 
-        fn path(&self) -> &std::path::Path {
-            &self.path
-        }
-    }
+        let config: ProviderConfig = serde_json::from_str(json).unwrap();
 
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        assert_eq!(config.id, 1);
+        assert_eq!(config.auth_header_name, "Authorization");
+        assert_eq!(config.auth_header_value_prefix, "Bearer ");
+        assert_eq!(config.models[0].id, "gpt-4o");
+        assert_eq!(config.models[0].context_window, 128000);
     }
 
     #[test]
-    fn test_debug_output_redacts_api_key() {
+    fn provider_config_deserializes_valid_json_with_custom_auth_fields() {
+        let json = r#"
+        {
+          "id": 7,
+          "name": "Custom",
+          "base_url": "https://api.example.com",
+          "api_key_encrypted": [9, 8, 7],
+          "auth_header_name": "X-API-Key",
+          "auth_header_value_prefix": "",
+          "models": [],
+          "request_body_template": {"model": "{model}"},
+          "response_path": "content"
+        }
+        "#;
+
+        let config: ProviderConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.auth_header_name, "X-API-Key");
+        assert_eq!(config.auth_header_value_prefix, "");
+    }
+
+    #[test]
+    fn provider_config_rejects_invalid_json() {
+        let json = r#"
+        {
+          "id": 1,
+          "name": "Broken",
+          "base_url": "https://api.example.com",
+          "api_key_encrypted": [1, 2, 3],
+          "models": [
+            {"id": "missing-context-window", "name": "Broken"}
+          ],
+          "request_body_template": {},
+          "response_path": "content"
+        }
+        "#;
+
+        let error = serde_json::from_str::<ProviderConfig>(json).unwrap_err();
+        assert!(error.to_string().contains("context_window"));
+    }
+
+    #[test]
+    fn debug_output_redacts_encrypted_api_key() {
         let config = ProviderConfig {
+            id: 1,
             name: "test-provider".to_string(),
             base_url: "https://api.example.com".to_string(),
-            api_key: "super-secret-api-key-12345".to_string(),
-            model: "gpt-4".to_string(),
+            api_key_encrypted: vec![115, 117, 112, 101, 114, 45, 115, 101, 99, 114, 101, 116],
+            auth_header_name: default_auth_header_name(),
+            auth_header_value_prefix: default_auth_header_value_prefix(),
+            models: vec![ModelInfo {
+                id: "gpt-4".to_string(),
+                name: "GPT-4".to_string(),
+                context_window: 8192,
+            }],
+            request_body_template: serde_json::json!({"model": "{model}"}),
+            response_path: "choices[0].message.content".to_string(),
         };
 
-        let debug_output = format!("{:?}", config);
+        let debug_output = format!("{config:?}");
 
-        // Should contain [REDACTED]
         assert!(debug_output.contains("[REDACTED]"));
-
-        // Should NOT contain the actual API key
-        assert!(!debug_output.contains("super-secret-api-key-12345"));
-
-        // Should contain other fields
+        assert!(!debug_output.contains("super-secret"));
+        assert!(!debug_output.contains("115"));
         assert!(debug_output.contains("test-provider"));
-        assert!(debug_output.contains("https://api.example.com"));
         assert!(debug_output.contains("gpt-4"));
-    }
-
-    #[test]
-    fn test_debug_output_with_empty_api_key() {
-        let config = ProviderConfig {
-            name: "test-provider".to_string(),
-            base_url: "https://api.example.com".to_string(),
-            api_key: "".to_string(),
-            model: "gpt-4".to_string(),
-        };
-
-        let debug_output = format!("{:?}", config);
-
-        // Should still show [REDACTED] even for empty key
-        assert!(debug_output.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn test_encrypt_decrypt_api_key_round_trip() {
-        let test_dir = TestDir::new();
-        let encryptor = Encryptor::new(test_dir.path()).unwrap();
-
-        let mut config = ProviderConfig {
-            name: "openai".to_string(),
-            base_url: "https://api.openai.com".to_string(),
-            api_key: "sk-this-is-a-secret-key".to_string(),
-            model: "gpt-4".to_string(),
-        };
-
-        // Encrypt the key
-        let encrypted = config.encrypt_api_key(&encryptor).unwrap();
-
-        // The encrypted data should be longer than the plaintext (nonce + ciphertext + tag)
-        assert!(encrypted.len() > 12);
-
-        // Replace key with garbage, then restore via decryption
-        config.api_key = "garbage".to_string();
-        config.decrypt_api_key(&encryptor, &encrypted).unwrap();
-        assert_eq!(config.api_key, "sk-this-is-a-secret-key");
-    }
-
-    #[test]
-    fn test_encrypt_api_key_different_encryptors_produce_different_ciphertexts() {
-        let dir_a = TestDir::new();
-        let dir_b = TestDir::new();
-
-        let enc_a = Encryptor::new(dir_a.path()).unwrap();
-        let enc_b = Encryptor::new(dir_b.path()).unwrap();
-
-        let config = ProviderConfig {
-            name: "openai".to_string(),
-            base_url: "https://api.openai.com".to_string(),
-            api_key: "sk-test-key".to_string(),
-            model: "gpt-4".to_string(),
-        };
-
-        let encrypted_a = config.encrypt_api_key(&enc_a).unwrap();
-        let encrypted_b = config.encrypt_api_key(&enc_b).unwrap();
-
-        // Different keys should produce different ciphertexts
-        assert_ne!(encrypted_a, encrypted_b);
-
-        // Decrypting with wrong key should fail
-        let mut config2 = config.clone();
-        let result = config2.decrypt_api_key(&enc_b, &encrypted_a);
-        assert!(result.is_err());
     }
 }
