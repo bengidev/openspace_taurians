@@ -5,8 +5,7 @@
  * that use `tauri::ipc::Channel<T>`.
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import { Channel } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 
 /**
  * Options for invokeStream
@@ -82,22 +81,33 @@ export async function* invokeStream<T>(
     [channelParam]: channel,
   })
     .then(() => {
-      // Command completed successfully
+      // Command completed successfully.
+      // Defer waking the waiter so any onmessage callbacks already enqueued
+      // as microtasks (via the Tauri IPC bridge) can fire first and deliver
+      // items directly to the waiter or buffer them.
       done = true;
       if (waiter) {
-        const resolve = waiter;
-        waiter = null;
-        resolve({ value: undefined, done: true });
+        queueMicrotask(() => {
+          if (waiter) {
+            const resolve = waiter;
+            waiter = null;
+            resolve({ value: undefined, done: true });
+          }
+        });
       }
     })
     .catch((err) => {
-      // Command failed
+      // Command failed — same deferred-wake pattern.
       done = true;
       error = err instanceof Error ? err : new Error(String(err));
       if (waiter) {
-        const resolve = waiter;
-        waiter = null;
-        resolve({ value: undefined, done: true });
+        queueMicrotask(() => {
+          if (waiter) {
+            const resolve = waiter;
+            waiter = null;
+            resolve({ value: undefined, done: true });
+          }
+        });
       }
     });
 
@@ -119,10 +129,9 @@ export async function* invokeStream<T>(
           waiter = resolve;
         });
         if (result.done) {
-          if (error) {
-            throw error;
-          }
-          return;
+          // Items may have been buffered between the waiter wake and this
+          // check. Loop back to the top to drain the buffer before exiting.
+          continue;
         }
         yield result.value;
       }

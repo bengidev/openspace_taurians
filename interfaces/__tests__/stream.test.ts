@@ -192,4 +192,31 @@ describe("invokeStream", () => {
       }
     }).rejects.toThrow("string error");
   });
+
+  it("should not drop items that arrive as microtasks alongside invoke resolution", async () => {
+    // Regression: items arriving via onmessage in the same microtask queue
+    // as invokePromise's .then() handler must not be dropped. The fix uses
+    // queueMicrotask in .then() to defer the done wake, giving onmessage
+    // callbacks a chance to claim the waiter first.
+    let onEvent: ((data: unknown) => void) | null = null;
+
+    mockInvoke.mockImplementation(
+      (_command: string, args: Record<string, unknown>) => {
+        onEvent = (args.onEvent as MockChannelInstance).onmessage;
+        // Simulate items arriving via microtasks (as the Tauri IPC bridge does)
+        queueMicrotask(() => onEvent?.("a"));
+        queueMicrotask(() => onEvent?.("b"));
+        queueMicrotask(() => onEvent?.("c"));
+        return Promise.resolve();
+      }
+    );
+
+    const collector: string[] = [];
+    for await (const item of invokeStream<string>("test_command")) {
+      collector.push(item);
+    }
+
+    expect(collector).toEqual(["a", "b", "c"]);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+  });
 });

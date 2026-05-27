@@ -62,7 +62,7 @@ mod tests {
     {
         let tauri_channel = tauri::ipc::Channel::<T>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let item: T = serde_json::from_str(&s).unwrap();
+                let item: T = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received.lock().unwrap().push(item);
             }
             Ok(())
@@ -118,7 +118,7 @@ mod tests {
             // Simulate slow processing
             std::thread::sleep(Duration::from_millis(1));
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let n: i32 = serde_json::from_str(&s).unwrap();
+                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(n);
             }
             Ok(())
@@ -162,8 +162,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancellation_stream_drop() {
-        // When the stream itself is dropped (exhausted), the channel sees no more items
+    async fn test_stream_exhaustion_stops_sending() {
+        // When the stream is exhausted, the channel sees no more items
         let received = Arc::new(Mutex::new(Vec::new()));
         let channel = make_test_channel(received.clone());
 
@@ -173,6 +173,45 @@ mod tests {
         // Stream is exhausted, no more items should arrive
         let count = received.lock().unwrap().len();
         assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_into_channel_stream_send_error_stops_stream() {
+        // When the channel callback fails, the stream should stop and return an error
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let tauri_channel = tauri::ipc::Channel::<i32>::new(move |body| {
+            call_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = call_count_clone.load(std::sync::atomic::Ordering::SeqCst);
+            if count == 2 {
+                // Fail on the second item
+                return Err(tauri::Error::WebviewNotFound);
+            }
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
+                received_clone.lock().unwrap().push(n);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let stream = stream::iter(vec![1, 2, 3]);
+        let result = into_channel_stream(stream, &channel).await;
+
+        assert!(result.is_err(), "expected send error, got success");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("failed to send message through channel"),
+            "unexpected error message: {err_msg}"
+        );
+
+        // Only item 1 should have been received; item 2 failed and item 3 was never polled
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1, "only the first item should have been received");
+        assert_eq!(received[0], 1);
     }
 
     #[tokio::test]

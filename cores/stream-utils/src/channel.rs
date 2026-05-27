@@ -55,10 +55,7 @@ impl<T: Serialize + Clone + Send + 'static> Clone for Channel<T> {
     }
 }
 
-// Safety: Channel is Send + Sync when T is Send + Sync
-// tauri::ipc::Channel<T> is Send + Sync when T is Send + Sync
-unsafe impl<T: Serialize + Clone + Send + 'static> Send for Channel<T> {}
-unsafe impl<T: Serialize + Clone + Send + 'static> Sync for Channel<T> {}
+// Send and Sync are auto-derived from tauri::ipc::Channel<T>.
 
 #[cfg(test)]
 mod tests {
@@ -80,7 +77,7 @@ mod tests {
 
         let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let s: String = serde_json::from_str(&s).unwrap();
+                let s: String = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(s);
             }
             Ok(())
@@ -103,7 +100,7 @@ mod tests {
 
         let tauri_channel = tauri::ipc::Channel::<i32>::new(move |body| {
             if let tauri::ipc::InvokeResponseBody::Json(s) = body {
-                let n: i32 = serde_json::from_str(&s).unwrap();
+                let n: i32 = serde_json::from_str(&s).expect("malformed JSON in test channel callback");
                 received_clone.lock().unwrap().push(n);
             }
             Ok(())
@@ -126,5 +123,14 @@ mod tests {
         let tauri_channel = tauri::ipc::Channel::<String>::new(|_| Ok(()));
         let channel = Channel::from_tauri(tauri_channel);
         let _inner = channel.into_inner();
+    }
+
+    #[test]
+    fn test_channel_error_display() {
+        let err = ChannelError::SendFailed("test error".into());
+        assert_eq!(
+            err.to_string(),
+            "failed to send message through channel: test error"
+        );
     }
 }
