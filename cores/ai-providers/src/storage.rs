@@ -253,30 +253,25 @@ impl ProviderStore {
     /// Update a provider. Returns `true` when a row was updated.
     pub fn update(&self, id: i64, input: UpdateProviderConfig) -> Result<bool, ProviderStoreError> {
         // Check if the provider exists.
-        let exists: bool = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM providers WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, i64>(0),
-            )?
-            > 0;
+        let exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM providers WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
 
         if !exists {
             return Ok(false);
         }
 
-        let existing_key: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT api_key_encrypted FROM providers WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )?;
+        let existing_key: Option<Vec<u8>> = self.conn.query_row(
+            "SELECT api_key_encrypted FROM providers WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
 
         let encrypted_key: Option<Vec<u8>> = match input.api_key {
             Some(ref key) if !key.is_empty() => Some(self.encryptor.encrypt(key.as_bytes())?),
-            Some(_) => None, // empty string → clear key
+            Some(_) => None,      // empty string → clear key
             None => existing_key, // None → preserve existing
         };
         let models_json = serde_json::to_string(&input.models)?;
@@ -373,8 +368,6 @@ impl ProviderStore {
         }
         Ok(seeded)
     }
-
-
 
     fn provider_from_row(
         &self,
@@ -491,9 +484,15 @@ mod tests {
         assert_eq!(provider.auth_header_name, "Authorization");
         assert_eq!(provider.auth_header_value_prefix, "Bearer ");
         assert_eq!(provider.models, vec![model()]);
-        assert!(provider.api_key_encrypted.as_ref().is_some_and(|v| !v.is_empty()));
+        assert!(provider
+            .api_key_encrypted
+            .as_ref()
+            .is_some_and(|v| !v.is_empty()));
         assert!(provider.has_api_key());
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-secret".to_string()));
+        assert_eq!(
+            store.decrypt_api_key(&provider).unwrap(),
+            Some("sk-secret".to_string())
+        );
 
         let providers = store.list().unwrap();
         assert_eq!(providers.len(), 1);
@@ -524,7 +523,10 @@ mod tests {
         assert_eq!(provider.name, "Anthropic");
         assert_eq!(provider.auth_header_name, "X-API-Key");
         assert_eq!(provider.auth_header_value_prefix, "");
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-new-secret".to_string()));
+        assert_eq!(
+            store.decrypt_api_key(&provider).unwrap(),
+            Some("sk-new-secret".to_string())
+        );
 
         assert!(store.delete(id).unwrap());
         assert!(store.get(id).unwrap().is_none());
@@ -556,7 +558,10 @@ mod tests {
 
         let provider = store.get(id).unwrap().unwrap();
         assert_eq!(provider.api_key_encrypted, before);
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-preserved".to_string()));
+        assert_eq!(
+            store.decrypt_api_key(&provider).unwrap(),
+            Some("sk-preserved".to_string())
+        );
     }
 
     #[test]
@@ -625,7 +630,10 @@ mod tests {
         let user_provider = store.get(id).unwrap().unwrap();
         assert_eq!(user_provider.name, "OpenAI");
         assert!(user_provider.has_api_key());
-        assert_eq!(store.decrypt_api_key(&user_provider).unwrap(), Some("sk-user-key".to_string()));
+        assert_eq!(
+            store.decrypt_api_key(&user_provider).unwrap(),
+            Some("sk-user-key".to_string())
+        );
     }
 
     #[test]

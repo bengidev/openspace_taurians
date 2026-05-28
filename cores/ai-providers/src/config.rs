@@ -95,7 +95,7 @@ pub mod default_profiles {
             name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1/chat/completions".to_string(),
             api_key: None,
-            auth_header_name: None, // uses default "Authorization"
+            auth_header_name: None,         // uses default "Authorization"
             auth_header_value_prefix: None, // uses default "Bearer "
             models: vec![
                 ModelInfo {
@@ -121,11 +121,8 @@ pub mod default_profiles {
 
     /// Anthropic Claude provider profile (key-less seed).
     ///
-    /// **Limitation:** Anthropic Messages API requires an `anthropic-version`
-    /// request header (e.g. `anthropic-version: 2023-06-01`) in addition to
-    /// `x-api-key`. The current config schema only supports a single auth
-    /// header, so requests to this profile will fail until multi-header auth
-    /// is implemented.
+    /// The adapter adds Anthropic's required `anthropic-version: 2023-06-01`
+    /// request header automatically for `api.anthropic.com` URLs.
     pub fn anthropic() -> NewProviderConfig {
         NewProviderConfig {
             name: "Anthropic".to_string(),
@@ -145,9 +142,8 @@ pub mod default_profiles {
                     context_window: 200_000,
                 },
             ],
-            // Anthropic Messages API requires max_tokens; does not use temperature/stream
-            // in the same way as OpenAI. stream and temperature fields are included for
-            // adapter compatibility but may not work correctly.
+            // Anthropic Messages API requires max_tokens. Keep stream and temperature
+            // configurable through the generic adapter template.
             request_body_template: serde_json::json!({
                 "model": "{model}",
                 "messages": "{messages}",
@@ -307,7 +303,9 @@ mod tests {
             id: 1,
             name: "test-provider".to_string(),
             base_url: "https://api.example.com".to_string(),
-            api_key_encrypted: Some(vec![115, 117, 112, 101, 114, 45, 115, 101, 99, 114, 101, 116]),
+            api_key_encrypted: Some(vec![
+                115, 117, 112, 101, 114, 45, 115, 101, 99, 114, 101, 116,
+            ]),
             auth_header_name: default_auth_header_name(),
             auth_header_value_prefix: default_auth_header_value_prefix(),
             models: vec![ModelInfo {
