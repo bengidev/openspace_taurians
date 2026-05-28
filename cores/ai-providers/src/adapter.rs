@@ -72,7 +72,7 @@ pub struct AiProvider {
 impl AiProvider {
     /// Build an adapter from persisted config, decrypting the API key once.
     pub fn new(config: ProviderConfig, encryptor: &Encryptor) -> Result<Self, AiProviderError> {
-        let api_key = config.decrypt_api_key(encryptor)?;
+        let api_key = config.decrypt_api_key(encryptor)?.unwrap_or_default();
         Ok(Self::with_api_key(config, api_key))
     }
 
@@ -449,7 +449,7 @@ mod tests {
             id: 1,
             name: "Test".to_string(),
             base_url: "http://127.0.0.1/chat".to_string(),
-            api_key_encrypted: vec![1, 2, 3],
+            api_key_encrypted: Some(vec![1, 2, 3]),
             auth_header_name: "Authorization".to_string(),
             auth_header_value_prefix: "Bearer ".to_string(),
             models: vec![ModelInfo {

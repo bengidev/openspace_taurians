@@ -25,11 +25,14 @@ pub enum ProviderStoreError {
 }
 
 /// Fields accepted when creating a provider.
+///
+/// When `api_key` is `None`, the provider is stored without an encrypted key
+/// (used for seed/default profiles). Users can set a key later via `update`.
 #[derive(Debug, Clone)]
 pub struct NewProviderConfig {
     pub name: String,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
     pub auth_header_name: Option<String>,
     pub auth_header_value_prefix: Option<String>,
     pub models: Vec<ModelInfo>,
@@ -38,6 +41,11 @@ pub struct NewProviderConfig {
 }
 
 /// Fields accepted when updating a provider.
+///
+/// `api_key` semantics:
+/// - `Some(new_key)` → encrypt and store the new key
+/// - `None` → preserve the existing key
+/// - `Some("")` → clear the key (set to NULL)
 #[derive(Debug, Clone)]
 pub struct UpdateProviderConfig {
     pub name: String,
@@ -90,7 +98,7 @@ impl ProviderStore {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 base_url TEXT NOT NULL,
-                api_key_encrypted BLOB NOT NULL,
+                api_key_encrypted BLOB,
                 auth_header_name TEXT NOT NULL DEFAULT 'Authorization',
                 auth_header_value_prefix TEXT NOT NULL DEFAULT 'Bearer ',
                 models TEXT NOT NULL,
@@ -99,12 +107,57 @@ impl ProviderStore {
             );
             "#,
         )?;
+        // Migrate existing databases that had NOT NULL constraint on api_key_encrypted.
+        self.migrate_nullable_api_key()?;
+        Ok(())
+    }
+
+    /// If the existing `providers` table has a NOT NULL constraint on
+    /// `api_key_encrypted`, recreate it with a nullable column.
+    fn migrate_nullable_api_key(&self) -> Result<(), ProviderStoreError> {
+        let column_notnull: i32 = self
+            .conn
+            .query_row(
+                "SELECT [notnull] FROM pragma_table_info('providers') WHERE name = 'api_key_encrypted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0); // default to 0 (nullable) if query fails
+
+        if column_notnull == 0 {
+            return Ok(());
+        }
+
+        // Recreate with nullable column, preserving all existing data.
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE providers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key_encrypted BLOB,
+                auth_header_name TEXT NOT NULL DEFAULT 'Authorization',
+                auth_header_value_prefix TEXT NOT NULL DEFAULT 'Bearer ',
+                models TEXT NOT NULL,
+                request_body_template TEXT NOT NULL,
+                response_path TEXT NOT NULL
+            );
+            INSERT INTO providers_new SELECT * FROM providers;
+            DROP TABLE providers;
+            ALTER TABLE providers_new RENAME TO providers;
+            "#,
+        )?;
         Ok(())
     }
 
     /// Create a provider and return its generated id.
+    ///
+    /// When `api_key` is `None` (or empty), `api_key_encrypted` is stored as NULL.
     pub fn create(&self, input: NewProviderConfig) -> Result<i64, ProviderStoreError> {
-        let encrypted_key = self.encryptor.encrypt(input.api_key.as_bytes())?;
+        let encrypted_key: Option<Vec<u8>> = match input.api_key {
+            Some(ref key) if !key.is_empty() => Some(self.encryptor.encrypt(key.as_bytes())?),
+            _ => None,
+        };
         let models_json = serde_json::to_string(&input.models)?;
         let template_json = serde_json::to_string(&input.request_body_template)?;
         let auth_header_name = input
@@ -199,22 +252,32 @@ impl ProviderStore {
 
     /// Update a provider. Returns `true` when a row was updated.
     pub fn update(&self, id: i64, input: UpdateProviderConfig) -> Result<bool, ProviderStoreError> {
+        // Check if the provider exists.
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )?
+            > 0;
+
+        if !exists {
+            return Ok(false);
+        }
+
         let existing_key: Option<Vec<u8>> = self
             .conn
             .query_row(
                 "SELECT api_key_encrypted FROM providers WHERE id = ?1",
                 params![id],
                 |row| row.get(0),
-            )
-            .optional()?;
+            )?;
 
-        let Some(existing_key) = existing_key else {
-            return Ok(false);
-        };
-
-        let encrypted_key = match input.api_key {
-            Some(api_key) => self.encryptor.encrypt(api_key.as_bytes())?,
-            None => existing_key,
+        let encrypted_key: Option<Vec<u8>> = match input.api_key {
+            Some(ref key) if !key.is_empty() => Some(self.encryptor.encrypt(key.as_bytes())?),
+            Some(_) => None, // empty string → clear key
+            None => existing_key, // None → preserve existing
         };
         let models_json = serde_json::to_string(&input.models)?;
         let template_json = serde_json::to_string(&input.request_body_template)?;
@@ -264,7 +327,12 @@ impl ProviderStore {
     }
 
     /// Decrypt an encrypted provider API key for internal callers/tests.
-    pub fn decrypt_api_key(&self, provider: &ProviderConfig) -> Result<String, ProviderStoreError> {
+    ///
+    /// Returns `Ok(None)` when the provider has no API key (seed profile).
+    pub fn decrypt_api_key(
+        &self,
+        provider: &ProviderConfig,
+    ) -> Result<Option<String>, ProviderStoreError> {
         provider
             .decrypt_api_key(&self.encryptor)
             .map_err(Into::into)
@@ -281,6 +349,33 @@ impl ProviderStore {
             })
     }
 
+    /// Check if a provider with the given name already exists.
+    fn provider_exists(&self, name: &str) -> Result<bool, ProviderStoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM providers WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Seed default (key-less) provider profiles into the database.
+    ///
+    /// Idempotent: profiles are only inserted when no profile with the same
+    /// name exists.
+    pub fn seed_default_profiles(&self) -> Result<usize, ProviderStoreError> {
+        let mut seeded = 0;
+        for profile in crate::config::default_profiles::all() {
+            if !self.provider_exists(&profile.name)? {
+                self.create(profile)?;
+                seeded += 1;
+            }
+        }
+        Ok(seeded)
+    }
+
+
+
     fn provider_from_row(
         &self,
         row: &rusqlite::Row<'_>,
@@ -296,7 +391,7 @@ impl ProviderStore {
             id: row.get(0)?,
             name: row.get(1)?,
             base_url: row.get(2)?,
-            api_key_encrypted: row.get(3)?,
+            api_key_encrypted: row.get::<_, Option<Vec<u8>>>(3)?,
             auth_header_name: row.get(4)?,
             auth_header_value_prefix: row.get(5)?,
             models,
@@ -309,7 +404,10 @@ impl ProviderStore {
         &self,
         provider: ProviderConfig,
     ) -> Result<ProviderConfig, ProviderStoreError> {
-        let _ = self.decrypt_api_key(&provider)?;
+        // Seed profiles (no key) skip decryption verification.
+        if provider.has_api_key() {
+            let _ = self.decrypt_api_key(&provider)?;
+        }
         Ok(provider)
     }
 }
@@ -366,7 +464,7 @@ mod tests {
         NewProviderConfig {
             name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
-            api_key: api_key.to_string(),
+            api_key: Some(api_key.to_string()),
             auth_header_name: None,
             auth_header_value_prefix: None,
             models: vec![model()],
@@ -393,8 +491,9 @@ mod tests {
         assert_eq!(provider.auth_header_name, "Authorization");
         assert_eq!(provider.auth_header_value_prefix, "Bearer ");
         assert_eq!(provider.models, vec![model()]);
-        assert_ne!(provider.api_key_encrypted, b"sk-secret");
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), "sk-secret");
+        assert!(provider.api_key_encrypted.as_ref().is_some_and(|v| !v.is_empty()));
+        assert!(provider.has_api_key());
+        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-secret".to_string()));
 
         let providers = store.list().unwrap();
         assert_eq!(providers.len(), 1);
@@ -425,7 +524,7 @@ mod tests {
         assert_eq!(provider.name, "Anthropic");
         assert_eq!(provider.auth_header_name, "X-API-Key");
         assert_eq!(provider.auth_header_value_prefix, "");
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), "sk-new-secret");
+        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-new-secret".to_string()));
 
         assert!(store.delete(id).unwrap());
         assert!(store.get(id).unwrap().is_none());
@@ -457,7 +556,76 @@ mod tests {
 
         let provider = store.get(id).unwrap().unwrap();
         assert_eq!(provider.api_key_encrypted, before);
-        assert_eq!(store.decrypt_api_key(&provider).unwrap(), "sk-preserved");
+        assert_eq!(store.decrypt_api_key(&provider).unwrap(), Some("sk-preserved".to_string()));
+    }
+
+    #[test]
+    fn seed_default_profiles_inserts_all_and_is_idempotent() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        // First seed: inserts 3 profiles
+        let seeded = store.seed_default_profiles().unwrap();
+        assert_eq!(seeded, 3);
+
+        // Verify all three are present
+        let providers = store.list().unwrap();
+        assert_eq!(providers.len(), 3);
+
+        let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"OpenAI"));
+        assert!(names.contains(&"Anthropic"));
+        assert!(names.contains(&"OpenRouter"));
+
+        // All have no API key
+        for provider in &providers {
+            assert!(!provider.has_api_key());
+            assert_eq!(provider.api_key_encrypted, None);
+        }
+
+        // OpenAI specific checks
+        let openai = providers.iter().find(|p| p.name == "OpenAI").unwrap();
+        assert_eq!(openai.auth_header_name, "Authorization");
+        assert_eq!(openai.auth_header_value_prefix, "Bearer ");
+        assert!(openai.base_url.ends_with("/chat/completions"));
+        assert!(openai.models.iter().any(|m| m.id == "gpt-4o"));
+        assert_eq!(openai.response_path, "choices[0].message.content");
+
+        // Anthropic specific checks
+        let anthropic = providers.iter().find(|p| p.name == "Anthropic").unwrap();
+        assert_eq!(anthropic.auth_header_name, "x-api-key");
+        assert_eq!(anthropic.auth_header_value_prefix, "");
+        assert!(anthropic.models.iter().any(|m| m.id.contains("claude")));
+        assert_eq!(anthropic.response_path, "content[0].text");
+
+        // OpenRouter specific checks
+        let openrouter = providers.iter().find(|p| p.name == "OpenRouter").unwrap();
+        assert_eq!(openrouter.auth_header_name, "Authorization");
+        assert!(openrouter.models.iter().all(|m| m.id.contains('/')));
+
+        // Second seed: nothing inserted (idempotent)
+        let seeded_again = store.seed_default_profiles().unwrap();
+        assert_eq!(seeded_again, 0);
+        assert_eq!(store.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn seed_default_profiles_does_not_overwrite_user_data() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        // User creates their own OpenAI provider with a key first
+        let id = store.create(new_provider("sk-user-key")).unwrap();
+
+        // Seed should skip OpenAI (already exists) but insert Anthropic + OpenRouter
+        let seeded = store.seed_default_profiles().unwrap();
+        assert_eq!(seeded, 2);
+
+        // User's OpenAI is preserved
+        let user_provider = store.get(id).unwrap().unwrap();
+        assert_eq!(user_provider.name, "OpenAI");
+        assert!(user_provider.has_api_key());
+        assert_eq!(store.decrypt_api_key(&user_provider).unwrap(), Some("sk-user-key".to_string()));
     }
 
     #[test]

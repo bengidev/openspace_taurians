@@ -20,7 +20,7 @@ pub struct ProviderConfig {
     pub id: i64,
     pub name: String,
     pub base_url: String,
-    pub api_key_encrypted: Vec<u8>,
+    pub api_key_encrypted: Option<Vec<u8>>,
     #[serde(default = "default_auth_header_name")]
     pub auth_header_name: String,
     #[serde(default = "default_auth_header_value_prefix")]
@@ -32,13 +32,28 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     /// Decrypt the provider's encrypted API key for in-memory use by callers.
+    ///
+    /// Returns `Ok(None)` when the provider has no API key configured (seed profile).
     pub fn decrypt_api_key(
         &self,
         encryptor: &crate::encryption::Encryptor,
-    ) -> Result<String, crate::encryption::EncryptionError> {
-        let key_bytes = encryptor.decrypt(&self.api_key_encrypted)?;
-        String::from_utf8(key_bytes)
-            .map_err(|_| crate::encryption::EncryptionError::DecryptionFailed)
+    ) -> Result<Option<String>, crate::encryption::EncryptionError> {
+        match &self.api_key_encrypted {
+            Some(encrypted) if !encrypted.is_empty() => {
+                let key_bytes = encryptor.decrypt(encrypted)?;
+                String::from_utf8(key_bytes)
+                    .map(Some)
+                    .map_err(|_| crate::encryption::EncryptionError::DecryptionFailed)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Returns `true` if this provider has an API key configured.
+    pub fn has_api_key(&self) -> bool {
+        self.api_key_encrypted
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
     }
 }
 
@@ -64,6 +79,128 @@ pub fn default_auth_header_name() -> String {
 
 pub fn default_auth_header_value_prefix() -> String {
     "Bearer ".to_string()
+}
+
+/// Pre-configured (key-less) provider profiles for common LLM services.
+///
+/// Each profile has all fields populated except `api_key_encrypted`, which is
+/// left empty so the user supplies their own key.
+pub mod default_profiles {
+    use super::ModelInfo;
+    use crate::storage::NewProviderConfig;
+
+    /// OpenAI provider profile (key-less seed).
+    pub fn openai() -> NewProviderConfig {
+        NewProviderConfig {
+            name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1/chat/completions".to_string(),
+            api_key: None,
+            auth_header_name: None, // uses default "Authorization"
+            auth_header_value_prefix: None, // uses default "Bearer "
+            models: vec![
+                ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128_000,
+                },
+                ModelInfo {
+                    id: "gpt-4o-mini".to_string(),
+                    name: "GPT-4o mini".to_string(),
+                    context_window: 128_000,
+                },
+            ],
+            request_body_template: serde_json::json!({
+                "model": "{model}",
+                "messages": "{messages}",
+                "stream": "{stream}",
+                "temperature": "{temperature}"
+            }),
+            response_path: "choices[0].message.content".to_string(),
+        }
+    }
+
+    /// Anthropic Claude provider profile (key-less seed).
+    ///
+    /// **Limitation:** Anthropic Messages API requires an `anthropic-version`
+    /// request header (e.g. `anthropic-version: 2023-06-01`) in addition to
+    /// `x-api-key`. The current config schema only supports a single auth
+    /// header, so requests to this profile will fail until multi-header auth
+    /// is implemented.
+    pub fn anthropic() -> NewProviderConfig {
+        NewProviderConfig {
+            name: "Anthropic".to_string(),
+            base_url: "https://api.anthropic.com/v1/messages".to_string(),
+            api_key: None,
+            auth_header_name: Some("x-api-key".to_string()),
+            auth_header_value_prefix: Some(String::new()),
+            models: vec![
+                ModelInfo {
+                    id: "claude-sonnet-4-20250514".to_string(),
+                    name: "Claude Sonnet 4".to_string(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "claude-3-5-haiku-20241022".to_string(),
+                    name: "Claude 3.5 Haiku".to_string(),
+                    context_window: 200_000,
+                },
+            ],
+            // Anthropic Messages API requires max_tokens; does not use temperature/stream
+            // in the same way as OpenAI. stream and temperature fields are included for
+            // adapter compatibility but may not work correctly.
+            request_body_template: serde_json::json!({
+                "model": "{model}",
+                "messages": "{messages}",
+                "max_tokens": 1024,
+                "stream": "{stream}",
+                "temperature": "{temperature}"
+            }),
+            response_path: "content[0].text".to_string(),
+        }
+    }
+
+    /// OpenRouter provider profile (key-less seed).
+    ///
+    /// OpenRouter is OpenAI-compatible, so this profile uses the same template
+    /// and auth scheme as OpenAI.
+    pub fn openrouter() -> NewProviderConfig {
+        NewProviderConfig {
+            name: "OpenRouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            api_key: None,
+            auth_header_name: None,
+            auth_header_value_prefix: None,
+            models: vec![
+                ModelInfo {
+                    id: "openai/gpt-4o".to_string(),
+                    name: "GPT-4o (via OpenRouter)".to_string(),
+                    context_window: 128_000,
+                },
+                ModelInfo {
+                    id: "anthropic/claude-sonnet-4-20250514".to_string(),
+                    name: "Claude Sonnet 4 (via OpenRouter)".to_string(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "google/gemini-2.5-flash".to_string(),
+                    name: "Gemini 2.5 Flash (via OpenRouter)".to_string(),
+                    context_window: 1_048_576,
+                },
+            ],
+            request_body_template: serde_json::json!({
+                "model": "{model}",
+                "messages": "{messages}",
+                "stream": "{stream}",
+                "temperature": "{temperature}"
+            }),
+            response_path: "choices[0].message.content".to_string(),
+        }
+    }
+
+    /// All default provider profiles.
+    pub fn all() -> Vec<NewProviderConfig> {
+        vec![openai(), anthropic(), openrouter()]
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +235,28 @@ mod tests {
         assert_eq!(config.auth_header_value_prefix, "Bearer ");
         assert_eq!(config.models[0].id, "gpt-4o");
         assert_eq!(config.models[0].context_window, 128000);
+        assert!(config.has_api_key());
+    }
+
+    #[test]
+    fn provider_config_deserializes_null_api_key() {
+        let json = r#"
+        {
+          "id": 2,
+          "name": "OpenAI Seed",
+          "base_url": "https://api.openai.com/v1/chat/completions",
+          "api_key_encrypted": null,
+          "models": [
+            {"id": "gpt-4o", "name": "GPT-4o", "context_window": 128000}
+          ],
+          "request_body_template": {"model": "{model}", "messages": "{messages}"},
+          "response_path": "choices[0].message.content"
+        }
+        "#;
+
+        let config: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.has_api_key());
+        assert_eq!(config.api_key_encrypted, None);
     }
 
     #[test]
@@ -148,7 +307,7 @@ mod tests {
             id: 1,
             name: "test-provider".to_string(),
             base_url: "https://api.example.com".to_string(),
-            api_key_encrypted: vec![115, 117, 112, 101, 114, 45, 115, 101, 99, 114, 101, 116],
+            api_key_encrypted: Some(vec![115, 117, 112, 101, 114, 45, 115, 101, 99, 114, 101, 116]),
             auth_header_name: default_auth_header_name(),
             auth_header_value_prefix: default_auth_header_value_prefix(),
             models: vec![ModelInfo {
