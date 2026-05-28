@@ -3,23 +3,36 @@
 import { useEffect, useState } from "react";
 import { ProviderList } from "@/components/settings/ProviderList";
 import { ProviderForm } from "@/components/settings/ProviderForm";
-import { providerList, providerCreate, providerUpdate, providerDelete } from "@/lib/api/providers";
-import type { Provider, ProviderCreate, ProviderUpdate } from "@/lib/types/provider";
+import {
+  providerList,
+  providerCreate,
+  providerUpdate,
+  providerDelete,
+  activeProviderGet,
+  activeProviderSet,
+  activeProviderClear,
+} from "@/lib/api/providers";
+import type { ActiveProvider, Provider, ProviderCreate, ProviderUpdate } from "@/lib/types/provider";
 
 export default function SettingsPage() {
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [active, setActive] = useState<ActiveProvider | null>(null);
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadProviders();
+    loadData();
   }, []);
 
-  async function loadProviders() {
+  async function loadData() {
     try {
-      const list = await providerList();
+      const [list, currentActive] = await Promise.all([
+        providerList(),
+        activeProviderGet(),
+      ]);
       setProviders(list);
+      setActive(currentActive);
     } catch (err) {
       console.error("Failed to load providers:", err);
     } finally {
@@ -31,7 +44,7 @@ export default function SettingsPage() {
     try {
       await providerCreate(config);
       setShowForm(false);
-      await loadProviders();
+      await loadData();
     } catch (err) {
       alert(`Failed to create provider: ${err}`);
       throw err;
@@ -43,7 +56,7 @@ export default function SettingsPage() {
     try {
       await providerUpdate(config as ProviderUpdate);
       setEditingProvider(null);
-      await loadProviders();
+      await loadData();
     } catch (err) {
       alert(`Failed to update provider: ${err}`);
       throw err;
@@ -54,9 +67,31 @@ export default function SettingsPage() {
     if (!confirm("Delete this provider?")) return;
     try {
       await providerDelete(id);
-      await loadProviders();
+      if (active?.provider_id === id) {
+        setActive(null);
+      }
+      await loadData();
     } catch (err) {
       alert(`Failed to delete provider: ${err}`);
+    }
+  }
+
+  async function handleSetActive(providerId: number, model: string) {
+    try {
+      await activeProviderSet(providerId, model);
+      setActive({ provider_id: providerId, model });
+    } catch (err) {
+      alert(`Failed to set active provider: ${err}`);
+    }
+  }
+
+  async function handleClearActive() {
+    if (!confirm("Clear the active provider? Downstream AI features will be unconfigured.")) return;
+    try {
+      await activeProviderClear();
+      setActive(null);
+    } catch (err) {
+      alert(`Failed to clear active provider: ${err}`);
     }
   }
 
@@ -109,10 +144,38 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {active ? (
+        <div className="border border-blue-300 rounded-lg p-4 bg-blue-50/30">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-blue-900">Active Provider</h2>
+              <p className="text-sm text-blue-800 font-mono mt-1">
+                {providers.find((p) => p.id === active.provider_id)?.name ?? "Unknown"} —{" "}
+                {active.model}
+              </p>
+            </div>
+            <button
+              onClick={handleClearActive}
+              className="text-sm px-3 py-1 border border-blue-400 text-blue-700 rounded hover:bg-blue-100"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="border border-dashed rounded-lg p-4 bg-gray-50 text-center">
+          <p className="text-sm text-gray-500">
+            No active provider selected. AI features are unconfigured. Choose a provider and model below to activate.
+          </p>
+        </div>
+      )}
+
       <ProviderList
         providers={providers}
+        active={active}
         onEdit={handleEdit}
         onDelete={handleDelete}
+        onSetActive={handleSetActive}
       />
     </div>
   );
