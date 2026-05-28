@@ -82,6 +82,7 @@ impl ProviderStore {
         }
 
         let conn = Connection::open(database_path)?;
+        Self::enable_foreign_keys(&conn)?;
         let encryptor = Encryptor::new(data_dir.as_ref())?;
         let store = Self { conn, encryptor };
         store.migrate()?;
@@ -91,10 +92,16 @@ impl ProviderStore {
     /// Open an in-memory provider store for tests.
     pub fn in_memory(data_dir: impl AsRef<Path>) -> Result<Self, ProviderStoreError> {
         let conn = Connection::open_in_memory()?;
+        Self::enable_foreign_keys(&conn)?;
         let encryptor = Encryptor::new(data_dir.as_ref())?;
         let store = Self { conn, encryptor };
         store.migrate()?;
         Ok(store)
+    }
+
+    fn enable_foreign_keys(conn: &Connection) -> Result<(), ProviderStoreError> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
     }
 
     /// Apply the providers table migration.
@@ -439,15 +446,24 @@ impl ProviderStore {
         provider_id: i64,
         model: &str,
     ) -> Result<(), ProviderStoreError> {
-        // Verify the provider exists and the model is valid.
-        let exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM providers WHERE id = ?1",
-            params![provider_id],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-        if !exists {
+        // Verify the provider exists.
+        let provider = self.get(provider_id)?;
+        if provider.is_none() {
             return Err(ProviderStoreError::Adapter(format!(
                 "provider '{provider_id}' not found"
+            )));
+        }
+
+        // Verify the model is valid for this provider.
+        let valid_model = provider
+            .as_ref()
+            .unwrap()
+            .models
+            .iter()
+            .any(|m| m.id == model);
+        if !valid_model {
+            return Err(ProviderStoreError::Adapter(format!(
+                "model '{model}' not available for provider '{provider_id}'"
             )));
         }
 
@@ -760,6 +776,11 @@ mod tests {
         let id1 = store.create(new_provider("sk-key1")).unwrap();
         let mut input2 = new_provider("sk-key2");
         input2.name = "Anthropic".to_string();
+        input2.models = vec![ModelInfo {
+            id: "claude-3-opus".to_string(),
+            name: "Claude 3 Opus".to_string(),
+            context_window: 200000,
+        }];
         let id2 = store.create(input2).unwrap();
 
         store.set_active(id1, "gpt-4o").unwrap();
@@ -776,6 +797,16 @@ mod tests {
         let store = ProviderStore::in_memory(test_dir.path()).unwrap();
 
         let result = store.set_active(999, "gpt-4o");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn active_provider_set_fails_for_nonexistent_model() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id = store.create(new_provider("sk-key")).unwrap();
+        let result = store.set_active(id, "nonexistent-model");
         assert!(result.is_err());
     }
 
