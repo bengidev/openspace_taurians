@@ -10,11 +10,11 @@ export async function providerGet(id: number): Promise<Provider | null> {
 }
 
 export async function providerCreate(config: ProviderCreate): Promise<number> {
-  return invoke("provider_create", config);
+  return invoke("provider_create", { ...config });
 }
 
 export async function providerUpdate(config: ProviderUpdate): Promise<boolean> {
-  return invoke("provider_update", config);
+  return invoke("provider_update", { ...config });
 }
 
 export async function providerDelete(id: number): Promise<boolean> {

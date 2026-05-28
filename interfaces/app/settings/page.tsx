@@ -38,10 +38,10 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleUpdate(config: ProviderUpdate) {
+  async function handleUpdate(config: ProviderCreate | ProviderUpdate) {
     if (!editingProvider) return;
     try {
-      await providerUpdate(config);
+      await providerUpdate(config as ProviderUpdate);
       setEditingProvider(null);
       await loadProviders();
     } catch (err) {
