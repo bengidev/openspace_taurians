@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ai_providers::{
-    ChatMessage, ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore, ProviderTestResult,
-    UpdateProviderConfig,
+    ActiveProvider, ChatMessage, ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore,
+    ProviderTestResult, UpdateProviderConfig,
 };
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
 use stream_utils::Channel;
@@ -374,6 +374,28 @@ async fn provider_chat_stream(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn active_provider_get(state: tauri::State<'_, ProviderState>) -> Result<Option<ActiveProvider>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.get_active().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn active_provider_set(
+    provider_id: i64,
+    model: String,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.set_active(provider_id, &model).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn active_provider_clear(state: tauri::State<'_, ProviderState>) -> Result<bool, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.clear_active().map_err(|e| e.to_string())
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 fn main() {
@@ -393,6 +415,9 @@ fn main() {
             provider_delete,
             provider_test_connection,
             provider_chat_stream,
+            active_provider_get,
+            active_provider_set,
+            active_provider_clear,
         ])
         .setup(|app| {
             app.manage(ProviderState::new(app)?);
