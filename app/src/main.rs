@@ -131,6 +131,7 @@ struct ProviderResponse {
     name: String,
     base_url: String,
     api_key_redacted: String,
+    has_api_key: bool,
     auth_header_name: String,
     auth_header_value_prefix: String,
     models: Vec<ModelInfo>,
@@ -140,11 +141,14 @@ struct ProviderResponse {
 
 impl From<ProviderConfig> for ProviderResponse {
     fn from(provider: ProviderConfig) -> Self {
+        let has_api_key = provider.has_api_key();
+
         Self {
             id: provider.id,
             name: provider.name,
             base_url: provider.base_url,
             api_key_redacted: "[REDACTED]".to_string(),
+            has_api_key,
             auth_header_name: provider.auth_header_name,
             auth_header_value_prefix: provider.auth_header_value_prefix,
             models: provider.models,
