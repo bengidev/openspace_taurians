@@ -44,3 +44,8 @@ export interface ProviderTestResult {
   success: boolean;
   error?: string;
 }
+
+export interface ActiveProvider {
+  provider_id: number;
+  model: string;
+}

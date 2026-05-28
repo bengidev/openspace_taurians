@@ -6,8 +6,11 @@ import {
   providerUpdate,
   providerDelete,
   providerTestConnection,
+  activeProviderGet,
+  activeProviderSet,
+  activeProviderClear,
 } from "@/lib/api/providers";
-import type { Provider, ProviderCreate, ProviderUpdate, ProviderTestResult } from "@/lib/types/provider";
+import type { ActiveProvider, Provider, ProviderCreate, ProviderUpdate, ProviderTestResult } from "@/lib/types/provider";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -167,5 +170,56 @@ describe("Provider API", () => {
 
     expect(invoke).toHaveBeenCalledWith("provider_test_connection", { providerId: 99 });
     expect(result).toEqual(testResult);
+  });
+
+  it("activeProviderGet returns null when no active provider", async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    const result = await activeProviderGet();
+
+    expect(invoke).toHaveBeenCalledWith("active_provider_get");
+    expect(result).toBeNull();
+  });
+
+  it("activeProviderGet returns active provider", async () => {
+    const mockActive: ActiveProvider = {
+      provider_id: 5,
+      model: "gpt-4o",
+    };
+    vi.mocked(invoke).mockResolvedValue(mockActive);
+
+    const result = await activeProviderGet();
+
+    expect(invoke).toHaveBeenCalledWith("active_provider_get");
+    expect(result).toEqual(mockActive);
+  });
+
+  it("activeProviderSet sends provider_id and model", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await activeProviderSet(7, "claude-3-opus");
+
+    expect(invoke).toHaveBeenCalledWith("active_provider_set", {
+      providerId: 7,
+      model: "claude-3-opus",
+    });
+  });
+
+  it("activeProviderClear returns boolean", async () => {
+    vi.mocked(invoke).mockResolvedValue(true);
+
+    const result = await activeProviderClear();
+
+    expect(invoke).toHaveBeenCalledWith("active_provider_clear");
+    expect(result).toBe(true);
+  });
+
+  it("activeProviderClear returns false when no active provider", async () => {
+    vi.mocked(invoke).mockResolvedValue(false);
+
+    const result = await activeProviderClear();
+
+    expect(invoke).toHaveBeenCalledWith("active_provider_clear");
+    expect(result).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
+import type { ActiveProvider, Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
 
 export async function providerList(): Promise<Provider[]> {
   return invoke("provider_list");
@@ -23,4 +23,16 @@ export async function providerDelete(id: number): Promise<boolean> {
 
 export async function providerTestConnection(providerId: number): Promise<ProviderTestResult> {
   return invoke("provider_test_connection", { providerId });
+}
+
+export async function activeProviderGet(): Promise<ActiveProvider | null> {
+  return invoke("active_provider_get");
+}
+
+export async function activeProviderSet(providerId: number, model: string): Promise<void> {
+  return invoke("active_provider_set", { providerId, model });
+}
+
+export async function activeProviderClear(): Promise<boolean> {
+  return invoke("active_provider_clear");
 }
