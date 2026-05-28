@@ -10,4 +10,6 @@ pub use adapter::{
     ProviderTestResult,
 };
 pub use config::{default_profiles, ModelInfo, ProviderConfig};
-pub use storage::{NewProviderConfig, ProviderStore, ProviderStoreError, UpdateProviderConfig};
+pub use storage::{
+    ActiveProvider, NewProviderConfig, ProviderStore, ProviderStoreError, UpdateProviderConfig,
+};

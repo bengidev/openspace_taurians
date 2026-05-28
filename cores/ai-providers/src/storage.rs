@@ -58,6 +58,13 @@ pub struct UpdateProviderConfig {
     pub response_path: String,
 }
 
+/// The currently active provider and model choice, persisted across restarts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveProvider {
+    pub provider_id: i64,
+    pub model: String,
+}
+
 /// SQLite-backed provider configuration store.
 pub struct ProviderStore {
     conn: Connection,
@@ -75,6 +82,7 @@ impl ProviderStore {
         }
 
         let conn = Connection::open(database_path)?;
+        Self::enable_foreign_keys(&conn)?;
         let encryptor = Encryptor::new(data_dir.as_ref())?;
         let store = Self { conn, encryptor };
         store.migrate()?;
@@ -84,10 +92,16 @@ impl ProviderStore {
     /// Open an in-memory provider store for tests.
     pub fn in_memory(data_dir: impl AsRef<Path>) -> Result<Self, ProviderStoreError> {
         let conn = Connection::open_in_memory()?;
+        Self::enable_foreign_keys(&conn)?;
         let encryptor = Encryptor::new(data_dir.as_ref())?;
         let store = Self { conn, encryptor };
         store.migrate()?;
         Ok(store)
+    }
+
+    fn enable_foreign_keys(conn: &Connection) -> Result<(), ProviderStoreError> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
     }
 
     /// Apply the providers table migration.
@@ -104,6 +118,12 @@ impl ProviderStore {
                 models TEXT NOT NULL,
                 request_body_template TEXT NOT NULL,
                 response_path TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS active_provider (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                provider_id INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
             );
             "#,
         )?;
@@ -314,11 +334,22 @@ impl ProviderStore {
     }
 
     /// Delete a provider. Returns `true` when a row was deleted.
+    ///
+    /// If the deleted provider was the active selection, the active state is
+    /// cleared as well (enforced by `ON DELETE CASCADE`).
     pub fn delete(&self, id: i64) -> Result<bool, ProviderStoreError> {
-        Ok(self
+        let was_active = self
+            .get_active()?
+            .is_some_and(|a| a.provider_id == id);
+        let deleted = self
             .conn
             .execute("DELETE FROM providers WHERE id = ?1", params![id])?
-            > 0)
+            > 0;
+        if deleted && was_active {
+            // Safety: clear active even though CASCADE should handle it.
+            self.clear_active()?;
+        }
+        Ok(deleted)
     }
 
     /// Decrypt an encrypted provider API key for internal callers/tests.
@@ -391,6 +422,62 @@ impl ProviderStore {
             request_body_template,
             response_path: row.get(8)?,
         })
+    }
+
+    /// Get the currently active provider/model selection, or `None` if unset.
+    pub fn get_active(&self) -> Result<Option<ActiveProvider>, ProviderStoreError> {
+        let result: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT provider_id, model FROM active_provider WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(result.map(|(provider_id, model)| ActiveProvider {
+            provider_id,
+            model,
+        }))
+    }
+
+    /// Persist the active provider and model. Replaces any prior selection.
+    pub fn set_active(
+        &self,
+        provider_id: i64,
+        model: &str,
+    ) -> Result<(), ProviderStoreError> {
+        // Verify the provider exists.
+        let provider = self.get(provider_id)?;
+        if provider.is_none() {
+            return Err(ProviderStoreError::Adapter(format!(
+                "provider '{provider_id}' not found"
+            )));
+        }
+
+        // Verify the model is valid for this provider.
+        let valid_model = provider
+            .as_ref()
+            .unwrap()
+            .models
+            .iter()
+            .any(|m| m.id == model);
+        if !valid_model {
+            return Err(ProviderStoreError::Adapter(format!(
+                "model '{model}' not available for provider '{provider_id}'"
+            )));
+        }
+
+        self.conn.execute(
+            "INSERT INTO active_provider (id, provider_id, model) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET provider_id = ?1, model = ?2",
+            params![provider_id, model],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the active provider/model selection (e.g. on provider deletion).
+    pub fn clear_active(&self) -> Result<bool, ProviderStoreError> {
+        Ok(self.conn.execute("DELETE FROM active_provider WHERE id = 1", [])? > 0)
     }
 
     fn ensure_decryptable(
@@ -658,5 +745,111 @@ mod tests {
             .unwrap();
 
         assert!(!updated);
+    }
+
+    #[test]
+    fn active_provider_get_returns_none_when_unset() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        assert!(store.get_active().unwrap().is_none());
+    }
+
+    #[test]
+    fn active_provider_set_and_get_roundtrip() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id = store.create(new_provider("sk-key")).unwrap();
+        store.set_active(id, "gpt-4o").unwrap();
+
+        let active = store.get_active().unwrap().unwrap();
+        assert_eq!(active.provider_id, id);
+        assert_eq!(active.model, "gpt-4o");
+    }
+
+    #[test]
+    fn active_provider_set_replaces_previous() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id1 = store.create(new_provider("sk-key1")).unwrap();
+        let mut input2 = new_provider("sk-key2");
+        input2.name = "Anthropic".to_string();
+        input2.models = vec![ModelInfo {
+            id: "claude-3-opus".to_string(),
+            name: "Claude 3 Opus".to_string(),
+            context_window: 200000,
+        }];
+        let id2 = store.create(input2).unwrap();
+
+        store.set_active(id1, "gpt-4o").unwrap();
+        store.set_active(id2, "claude-3-opus").unwrap();
+
+        let active = store.get_active().unwrap().unwrap();
+        assert_eq!(active.provider_id, id2);
+        assert_eq!(active.model, "claude-3-opus");
+    }
+
+    #[test]
+    fn active_provider_set_fails_for_nonexistent_provider() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let result = store.set_active(999, "gpt-4o");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn active_provider_set_fails_for_nonexistent_model() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id = store.create(new_provider("sk-key")).unwrap();
+        let result = store.set_active(id, "nonexistent-model");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn active_provider_clear_removes_selection() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id = store.create(new_provider("sk-key")).unwrap();
+        store.set_active(id, "gpt-4o").unwrap();
+        assert!(store.get_active().unwrap().is_some());
+
+        store.clear_active().unwrap();
+        assert!(store.get_active().unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_active_provider_clears_active() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id = store.create(new_provider("sk-key")).unwrap();
+        store.set_active(id, "gpt-4o").unwrap();
+
+        store.delete(id).unwrap();
+        assert!(store.get_active().unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_inactive_provider_preserves_active() {
+        let test_dir = TestDir::new();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let id1 = store.create(new_provider("sk-key1")).unwrap();
+        let mut input2 = new_provider("sk-key2");
+        input2.name = "Anthropic".to_string();
+        let id2 = store.create(input2).unwrap();
+
+        store.set_active(id1, "gpt-4o").unwrap();
+        store.delete(id2).unwrap();
+
+        let active = store.get_active().unwrap().unwrap();
+        assert_eq!(active.provider_id, id1);
+        assert_eq!(active.model, "gpt-4o");
     }
 }
