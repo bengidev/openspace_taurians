@@ -9,5 +9,5 @@ pub use adapter::{
     extract_response_content, render_request_body, AiProvider, AiProviderError, ChatMessage,
     ProviderTestResult,
 };
-pub use config::{ModelInfo, ProviderConfig};
+pub use config::{default_profiles, ModelInfo, ProviderConfig};
 pub use storage::{NewProviderConfig, ProviderStore, ProviderStoreError, UpdateProviderConfig};

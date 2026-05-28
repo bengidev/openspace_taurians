@@ -27,9 +27,14 @@ pub struct ProviderTestResult {
     pub error: Option<String>,
 }
 
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 /// Errors returned by the generic provider adapter.
 #[derive(Debug, Error)]
 pub enum AiProviderError {
+    #[error("provider '{provider}' is missing an API key")]
+    MissingApiKey { provider: String },
+
     #[error("encryption error: {0}")]
     Encryption(#[from] EncryptionError),
 
@@ -72,7 +77,7 @@ pub struct AiProvider {
 impl AiProvider {
     /// Build an adapter from persisted config, decrypting the API key once.
     pub fn new(config: ProviderConfig, encryptor: &Encryptor) -> Result<Self, AiProviderError> {
-        let api_key = config.decrypt_api_key(encryptor)?;
+        let api_key = config.decrypt_api_key(encryptor)?.unwrap_or_default();
         Ok(Self::with_api_key(config, api_key))
     }
 
@@ -217,6 +222,12 @@ impl AiProvider {
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, AiProviderError> {
+        if self.api_key.trim().is_empty() {
+            return Err(AiProviderError::MissingApiKey {
+                provider: self.config.name.clone(),
+            });
+        }
+
         let name =
             HeaderName::from_bytes(self.config.auth_header_name.as_bytes()).map_err(|e| {
                 AiProviderError::InvalidHeaderName {
@@ -233,6 +244,12 @@ impl AiProvider {
 
         let mut headers = HeaderMap::new();
         headers.insert(name, value);
+        if requires_anthropic_version_header(&self.config.base_url) {
+            headers.insert(
+                HeaderName::from_static("anthropic-version"),
+                HeaderValue::from_static(ANTHROPIC_VERSION),
+            );
+        }
         Ok(headers)
     }
 
@@ -293,6 +310,10 @@ fn render_value(
         ),
         other => other.clone(),
     }
+}
+
+fn requires_anthropic_version_header(base_url: &str) -> bool {
+    base_url.contains("api.anthropic.com")
 }
 
 fn render_string(
@@ -449,7 +470,7 @@ mod tests {
             id: 1,
             name: "Test".to_string(),
             base_url: "http://127.0.0.1/chat".to_string(),
-            api_key_encrypted: vec![1, 2, 3],
+            api_key_encrypted: Some(vec![1, 2, 3]),
             auth_header_name: "Authorization".to_string(),
             auth_header_value_prefix: "Bearer ".to_string(),
             models: vec![ModelInfo {
@@ -588,6 +609,94 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "hello");
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0.7);
+    }
+
+    #[tokio::test]
+    async fn missing_api_key_fails_before_http_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "should not be called"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.name = "OpenAI".to_string();
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, String::new());
+
+        let error = provider
+            .chat_once(
+                "gpt-4o-mini",
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                0.7,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, AiProviderError::MissingApiKey { provider } if provider == "OpenAI")
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anthropic_requests_include_required_version_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"text": "mocked anthropic response"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("content[0].text");
+        provider_config.base_url =
+            format!("{}/v1/messages?upstream=api.anthropic.com", server.uri());
+        provider_config.auth_header_name = "x-api-key".to_string();
+        provider_config.auth_header_value_prefix = String::new();
+        provider_config.request_body_template = serde_json::json!({
+            "model": "{model}",
+            "messages": "{messages}",
+            "max_tokens": 1024,
+        });
+        let provider = AiProvider::with_api_key(provider_config, "anthropic-secret".to_string());
+
+        let content = provider
+            .chat_once(
+                "claude-sonnet-4-20250514",
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                0.7,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(content, "mocked anthropic response");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            request.headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "anthropic-secret"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("anthropic-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2023-06-01"
+        );
     }
 
     #[tokio::test]

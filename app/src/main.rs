@@ -91,11 +91,16 @@ impl ProviderState {
             .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
         let database_path = data_dir.join("openspace.sqlite3");
 
+        let store = ProviderStore::open(database_path, data_dir)
+            .map_err(|e| format!("failed to open provider store: {e}"))?;
+
+        // Seed default (key-less) provider profiles on first run.
+        store
+            .seed_default_profiles()
+            .map_err(|e| format!("failed to seed default provider profiles: {e}"))?;
+
         Ok(Self {
-            store: Mutex::new(
-                ProviderStore::open(database_path, data_dir)
-                    .map_err(|e| format!("failed to open provider store: {e}"))?,
-            ),
+            store: Mutex::new(store),
         })
     }
 }
@@ -260,16 +265,13 @@ fn provider_create(
     payload: ProviderWritePayload,
     state: tauri::State<'_, ProviderState>,
 ) -> Result<i64, String> {
-    let api_key = payload
-        .api_key
-        .ok_or_else(|| "api_key is required when creating a provider".to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
 
     store
         .create(NewProviderConfig {
             name: payload.name,
             base_url: payload.base_url,
-            api_key,
+            api_key: payload.api_key,
             auth_header_name: payload.auth_header_name,
             auth_header_value_prefix: payload.auth_header_value_prefix,
             models: payload.models,
