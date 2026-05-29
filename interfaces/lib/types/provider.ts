@@ -62,3 +62,10 @@ export interface ActiveProvider {
   provider_id: number;
   model: string;
 }
+
+// ── Chat types (sent to provider_chat_stream / chat_send_stream) ──
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+}

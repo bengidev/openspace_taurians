@@ -8,10 +8,15 @@ license.workspace = true
 ai-providers = { path = "../cores/ai-providers" }
 feature-registry = { path = "../cores/feature-registry" }
 stream-utils = { path = "../cores/stream-utils" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["test"] }
 tauri-plugin-global-shortcut = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

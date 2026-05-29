@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveProvider, Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
+import type { ActiveProvider, ChatMessage, Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
+import { invokeStream } from "../stream";
 
 export async function providerList(): Promise<Provider[]> {
   return invoke("provider_list");
@@ -35,4 +36,33 @@ export async function activeProviderSet(providerId: number, model: string): Prom
 
 export async function activeProviderClear(): Promise<boolean> {
   return invoke("active_provider_clear");
+}
+
+// ── Chat API ────────────────────────────────────────────────────
+
+export interface ChatSendOptions {
+  messages: ChatMessage[];
+  temperature?: number;
+}
+
+/**
+ * Stream a chat completion through the active provider/model.
+ *
+ * Yields string tokens as the provider produces them. The chat UI
+ * does not need to know which provider is behind the adapter.
+ *
+ * @throws if no active provider is configured or if the provider
+ *         returns an error (bad response path, auth failure, etc.).
+ */
+export async function* chatSend(
+  options: ChatSendOptions,
+): AsyncIterable<string> {
+  yield* invokeStream<string>(
+    "chat_send_stream",
+    {
+      messages: options.messages,
+      temperature: options.temperature ?? 0.7,
+    },
+    { channelParam: "onToken" },
+  );
 }
