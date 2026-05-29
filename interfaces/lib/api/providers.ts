@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ActiveProvider, ChatMessage, Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
+import type { ActiveProvider, ChatMessage, InlineCompletionRequest, InlineCompletionResponse, Provider, ProviderCreate, ProviderTestResult, ProviderUpdate } from "../types/provider";
 import { invokeStream } from "../stream";
 
 export async function providerList(): Promise<Provider[]> {
@@ -83,4 +83,23 @@ export async function* chatSend(
  */
 export async function chatCancel(): Promise<boolean> {
   return invoke("chat_cancel");
+}
+
+// ── Inline completion API ────────────────────────────────────────
+
+/**
+ * Request an inline code completion through the active provider/model.
+ *
+ * Sends the document context through the same generic provider adapter
+ * used by chat. The caller does not need to know which provider is
+ * behind the adapter — it simply passes document context and receives
+ * a completion string.
+ *
+ * @throws if no active provider is configured or if the provider
+ *         returns an error (bad response path, auth failure, etc.).
+ */
+export async function inlineCompletion(
+  request: InlineCompletionRequest,
+): Promise<InlineCompletionResponse> {
+  return invoke("inline_completion", { request });
 }
