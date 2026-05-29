@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 import { useChatStore } from "@/stores/chatStore";
 
 export function ChatPanel() {
+  const t = useTranslations();
   const {
     messages,
     isLoading,
@@ -43,17 +45,27 @@ export function ChatPanel() {
     }
   }
 
+  // ── Loading active provider ───────────────────────────────────
+
+  if (!providerLoaded) {
+    return (
+      <div className="flex items-center justify-center h-full text-sm text-zinc-400">
+        {t("chat.loading")}
+      </div>
+    );
+  }
+
   // ── No active provider: setup prompt ──────────────────────────
 
-  if (providerLoaded && !activeProvider) {
+  if (!activeProvider) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 p-6 text-center">
         <span className="text-4xl">💬</span>
-        <h2 className="text-lg font-semibold">Chat is not configured</h2>
+        <h2 className="text-lg font-semibold">{t("chat.notConfigured.title")}</h2>
         <p className="text-sm text-zinc-500 max-w-sm">
-          No active provider is set. Open{" "}
-          <span className="font-mono">Settings → Providers</span>, add or
-          select a provider, choose a model, and mark it as active.
+          {t("chat.notConfigured.descriptionBefore")}{" "}
+          <span className="font-mono">{t("chat.notConfigured.settingsPath")}</span>
+          {t("chat.notConfigured.descriptionAfter")}
         </p>
       </div>
     );
@@ -66,16 +78,14 @@ export function ChatPanel() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-200 dark:border-zinc-700">
         <div className="text-sm text-zinc-500">
-          {activeProvider
-            ? `Active model: ${activeProvider.model}`
-            : "Loading…"}
+          {t("chat.activeModel", { model: activeProvider.model })}
         </div>
         {messages.length > 0 && (
           <button
             onClick={clearMessages}
             className="text-xs px-2 py-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
           >
-            Clear
+            {t("chat.clear")}
           </button>
         )}
       </div>
@@ -85,7 +95,7 @@ export function ChatPanel() {
         {messages.length === 0 && !isLoading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-zinc-400">
             <span className="text-3xl">💬</span>
-            <p className="text-sm">Send a message to start chatting.</p>
+            <p className="text-sm">{t("chat.emptyState")}</p>
           </div>
         )}
 
@@ -131,7 +141,7 @@ export function ChatPanel() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type a message…"
+          placeholder={t("chat.inputPlaceholder")}
           rows={1}
           className="flex-1 resize-none rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           disabled={isLoading}
@@ -141,7 +151,7 @@ export function ChatPanel() {
           disabled={!input.trim() || isLoading}
           className="shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {isLoading ? "…" : "Send"}
+          {isLoading ? "…" : t("chat.send")}
         </button>
       </form>
     </div>

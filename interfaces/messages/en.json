@@ -21,5 +21,19 @@
     "chat": "Chat",
     "git": "Git",
     "settings": "Settings"
+  },
+  "chat": {
+    "notConfigured": {
+      "title": "Chat is not configured",
+      "descriptionBefore": "No active provider is set. Open",
+      "settingsPath": "Settings → Providers",
+      "descriptionAfter": ", add or select a provider, choose a model, and mark it as active."
+    },
+    "activeModel": "Active model: {model}",
+    "loading": "Loading…",
+    "clear": "Clear",
+    "emptyState": "Send a message to start chatting.",
+    "inputPlaceholder": "Type a message…",
+    "send": "Send"
   }
 }
