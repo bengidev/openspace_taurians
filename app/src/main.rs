@@ -395,6 +395,53 @@ async fn provider_chat_stream(
         .map_err(|e| e.to_string())
 }
 
+/// Stream a chat completion using the **active** provider and model.
+///
+/// The chat feature calls this command so it never needs to know which
+/// provider is selected — it simply passes user messages and receives
+/// tokens through the channel.
+#[tauri::command]
+async fn chat_send_stream(
+    messages: Vec<ChatMessage>,
+    temperature: Option<f64>,
+    on_token: tauri::ipc::Channel<String>,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<(), String> {
+    let (provider, model) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+
+        let active = store.get_active().map_err(|e| e.to_string())?;
+        let active = active.ok_or(
+            "No active provider configured. Open Settings → Providers to choose a provider and model.",
+        )?;
+
+        let provider = store
+            .ai_provider(active.provider_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "Active provider '{}' not found. It may have been deleted. \
+                     Open Settings → Providers to select a new one.",
+                    active.provider_id
+                )
+            })?;
+
+        (provider, active.model)
+    };
+
+    let channel = Channel::from_tauri(on_token);
+
+    provider
+        .chat_stream(
+            &model,
+            &messages,
+            temperature.unwrap_or(0.7),
+            &channel,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn active_provider_get(state: tauri::State<'_, ProviderState>) -> Result<Option<ActiveProvider>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -436,6 +483,7 @@ fn main() {
             provider_delete,
             provider_test_connection,
             provider_chat_stream,
+            chat_send_stream,
             active_provider_get,
             active_provider_set,
             active_provider_clear,
@@ -503,5 +551,203 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["api_key_redacted"], serde_json::json!("[REDACTED]"));
         assert!(json.get("api_key_encrypted").is_none());
+    }
+
+    // ── chat_send_stream integration tests ──────────────────────
+
+    /// Core chat logic extracted for direct testing without Tauri command
+    /// wrapper overhead. This mirrors what `chat_send_stream` does:
+    /// read active → resolve provider → stream through adapter.
+    async fn execute_chat(
+        store: &ProviderStore,
+        messages: Vec<ChatMessage>,
+        temperature: f64,
+        channel: &Channel<String>,
+    ) -> Result<(), String> {
+        let active = store
+            .get_active()
+            .map_err(|e| e.to_string())?
+            .ok_or("No active provider configured")?;
+
+        let provider = store
+            .ai_provider(active.provider_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("provider '{}' not found", active.provider_id))?;
+
+        provider
+            .chat_stream(&active.model, &messages, temperature, channel)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn chat_streams_tokens_through_active_provider() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let provider_id = store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].delta.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(provider_id, "gpt-4o").unwrap();
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Say hello".to_string(),
+        }];
+
+        execute_chat(&store, messages, 0.7, &channel).await.unwrap();
+
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec!["Hello".to_string(), " world".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_returns_clear_error_when_no_active_provider() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+        store.seed_default_profiles().unwrap();
+
+        let tauri_channel = tauri::ipc::Channel::<String>::new(|_| Ok(()));
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+
+        let error = execute_chat(&store, messages, 0.7, &channel)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("No active provider"),
+            "Expected clear no-provider message, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_produces_no_tokens_when_response_path_does_not_match() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Return a streaming response whose structure doesn't match the
+        // configured response_path. The adapter silently drops each token
+        // that fails extraction (normal SSE behaviour), so the stream
+        // completes with zero tokens rather than surfacing a hard error.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"unexpected_structure\": true}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let provider_id = store
+            .create(ai_providers::NewProviderConfig {
+                name: "Broken".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "model-x".to_string(),
+                    name: "Model X".to_string(),
+                    context_window: 4096,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}"
+                }),
+                response_path: "choices[0].message.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(provider_id, "model-x").unwrap();
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+
+        // Stream completes successfully but no tokens are extracted.
+        execute_chat(&store, messages, 0.7, &channel)
+            .await
+            .unwrap();
+
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "Expected zero tokens when response path does not match"
+        );
     }
 }
