@@ -40,9 +40,22 @@ export interface ProviderUpdate {
   response_path: string;
 }
 
+export type TestConnectionErrorKind =
+  | "auth"
+  | "network"
+  | "invalid_config"
+  | "http_status"
+  | "malformed_response"
+  | "unknown";
+
+export interface ProviderTestError {
+  kind: TestConnectionErrorKind;
+  message: string;
+}
+
 export interface ProviderTestResult {
   success: boolean;
-  error?: string;
+  error?: ProviderTestError;
 }
 
 export interface ActiveProvider {
