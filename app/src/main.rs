@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use ai_providers::{
     ActiveProvider, ChatMessage, ModelInfo, NewProviderConfig, ProviderConfig, ProviderStore,
-    ProviderTestResult, UpdateProviderConfig,
+    ProviderTestError, ProviderTestResult, TestConnectionErrorKind, UpdateProviderConfig,
 };
 use feature_registry::{FeatureId, FeatureMetadata, FeatureRegistry, PanelEvent, PanelLifecycle};
 use stream_utils::Channel;
@@ -343,10 +343,27 @@ async fn provider_test_connection(
 ) -> Result<ProviderTestResult, String> {
     let provider = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        store
-            .ai_provider(provider_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("provider '{provider_id}' not found"))?
+        match store.ai_provider(provider_id) {
+            Ok(Some(provider)) => provider,
+            Ok(None) => {
+                return Ok(ProviderTestResult {
+                    success: false,
+                    error: Some(ProviderTestError {
+                        kind: TestConnectionErrorKind::InvalidConfig,
+                        message: format!("provider '{provider_id}' not found"),
+                    }),
+                });
+            }
+            Err(err) => {
+                return Ok(ProviderTestResult {
+                    success: false,
+                    error: Some(ProviderTestError {
+                        kind: TestConnectionErrorKind::InvalidConfig,
+                        message: err.to_string(),
+                    }),
+                });
+            }
+        }
     };
 
     Ok(provider.test_connection().await)

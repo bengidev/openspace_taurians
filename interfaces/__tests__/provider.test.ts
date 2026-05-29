@@ -159,10 +159,10 @@ describe("Provider API", () => {
     expect(result).toEqual(testResult);
   });
 
-  it("providerTestConnection returns error result", async () => {
+  it("providerTestConnection returns error result with structured kind", async () => {
     const testResult: ProviderTestResult = {
       success: false,
-      error: "Connection timeout",
+      error: { kind: "network", message: "Connection timeout" },
     };
     vi.mocked(invoke).mockResolvedValue(testResult);
 

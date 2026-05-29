@@ -1,7 +1,13 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { ActiveProvider, Provider, ProviderTestResult } from "@/lib/types/provider";
+import type {
+  ActiveProvider,
+  Provider,
+  ProviderTestError,
+  ProviderTestResult,
+  TestConnectionErrorKind,
+} from "@/lib/types/provider";
 import { providerTestConnection } from "@/lib/api/providers";
 
 interface Props {
@@ -43,6 +49,42 @@ export function ProviderList({ providers, active, onEdit, onDelete, onSetActive 
   );
 }
 
+/** Map an error kind to a human-readable label. */
+function errorKindLabel(kind: TestConnectionErrorKind): string {
+  switch (kind) {
+    case "auth":
+      return "Authentication failed";
+    case "network":
+      return "Network error";
+    case "invalid_config":
+      return "Invalid configuration";
+    case "http_status":
+      return "Server error";
+    case "malformed_response":
+      return "Malformed response";
+    case "unknown":
+      return "Connection failed";
+  }
+}
+
+/** Map an error kind to a CSS class pair (bg + text). */
+function errorKindClasses(kind: TestConnectionErrorKind): string {
+  switch (kind) {
+    case "auth":
+      return "bg-amber-100 text-amber-800";
+    case "network":
+      return "bg-orange-100 text-orange-800";
+    case "invalid_config":
+      return "bg-yellow-100 text-yellow-800";
+    case "http_status":
+      return "bg-purple-100 text-purple-800";
+    case "malformed_response":
+      return "bg-pink-100 text-pink-800";
+    case "unknown":
+      return "bg-red-100 text-red-800";
+  }
+}
+
 function ProviderCard({
   provider,
   isActive,
@@ -79,7 +121,10 @@ function ProviderCard({
       const result = await providerTestConnection(provider.id);
       setTestResult(result);
     } catch (err) {
-      setTestResult({ success: false, error: String(err) });
+      setTestResult({
+        success: false,
+        error: { kind: "unknown", message: String(err) },
+      });
     } finally {
       setTesting(false);
     }
@@ -160,13 +205,18 @@ function ProviderCard({
 
       <div className="flex flex-col items-end gap-2 shrink-0">
         <div className="flex gap-2">
-          <button
-            onClick={handleTest}
-            disabled={testing || isMissingKey}
-            className="text-sm px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50"
+          <span
+            className="inline-block"
+            title={isMissingKey ? "Set an API key before testing" : undefined}
           >
-            {testing ? "Testing..." : "Test"}
-          </button>
+            <button
+              onClick={handleTest}
+              disabled={testing || isMissingKey}
+              className="text-sm px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-50"
+            >
+              {testing ? "Testing..." : "Test"}
+            </button>
+          </span>
           <button
             onClick={onEdit}
             className="text-sm px-3 py-1 border rounded hover:bg-gray-50"
@@ -181,20 +231,33 @@ function ProviderCard({
           </button>
         </div>
 
-        {testResult && (
-          <div
-            className={`text-xs px-2 py-1 rounded mt-1 ${
-              testResult.success
-                ? "bg-green-100 text-green-800"
-                : "bg-red-100 text-red-800"
-            }`}
-          >
-            {testResult.success
-              ? "✓ Connection OK"
-              : `✗ ${testResult.error ?? "Connection failed"}`}
-          </div>
-        )}
+        {testResult && <TestResultBadge result={testResult} />}
       </div>
+    </div>
+  );
+}
+
+export function TestResultBadge({ result }: { result: ProviderTestResult }) {
+  if (result.success) {
+    return (
+      <div className="text-xs px-2 py-1 rounded mt-1 bg-green-100 text-green-800">
+        ✓ Connection OK
+      </div>
+    );
+  }
+
+  const error: ProviderTestError = result.error ?? {
+    kind: "unknown",
+    message: "Connection failed",
+  };
+
+  return (
+    <div
+      data-testid="test-result-error"
+      className={`text-xs px-2 py-1 rounded mt-1 max-w-xs ${errorKindClasses(error.kind)}`}
+    >
+      <span className="font-semibold">{errorKindLabel(error.kind)}:</span>{" "}
+      {error.message}
     </div>
   );
 }
