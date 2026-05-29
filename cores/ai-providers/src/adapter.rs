@@ -59,9 +59,10 @@ pub struct ProviderTestResult {
 pub fn classify_test_error(message: &str) -> TestConnectionErrorKind {
     let lower = message.to_lowercase();
 
-    if lower.contains("missing an api key") {
-        TestConnectionErrorKind::InvalidConfig
-    } else if lower.contains("encryption error") || lower.contains("invalid auth header") {
+    if lower.contains("missing an api key")
+        || lower.contains("encryption error")
+        || lower.contains("invalid auth header")
+    {
         TestConnectionErrorKind::InvalidConfig
     } else if lower.contains("http error: ")
         && !lower.contains("returned http ")
