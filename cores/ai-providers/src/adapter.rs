@@ -934,9 +934,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_classifies_network_failure() {
-        // Use an unreachable URL to simulate a network failure.
-        let provider_config = config("choices[0].message.content");
-        // base_url points to a non-routable address.
+        // Simulate a network failure with a closed local port. Port 9
+        // (discard) has no listener, so localhost refuses the connection
+        // immediately on every platform — unlike port 80, which some CI
+        // runners answer, yielding an HTTP status instead of a transport error.
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = "http://127.0.0.1:9/chat".to_string();
         let provider =
             AiProvider::with_api_key(provider_config, "key".to_string());
 
