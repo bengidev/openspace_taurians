@@ -75,7 +75,7 @@ export interface ChatMessage {
 export interface InlineCompletionRequest {
   /** The full document text surrounding the cursor. */
   document: string;
-  /** Zero-based cursor offset in the document. */
+  /** Zero-based cursor offset in UTF-16 code units, matching browser/editor offsets such as textarea selectionStart. */
   cursor_position: number;
 }
 

@@ -560,7 +560,8 @@ fn active_provider_clear(state: tauri::State<'_, ProviderState>) -> Result<bool,
 struct InlineCompletionRequest {
     /// The full document text surrounding the cursor.
     document: String,
-    /// Zero-based cursor offset in the document.
+    /// Zero-based cursor offset in UTF-16 code units, matching browser/editor
+    /// cursor offsets such as `HTMLTextAreaElement.selectionStart`.
     cursor_position: u32,
 }
 
@@ -572,6 +573,40 @@ struct InlineCompletionResponse {
     provider_name: String,
     /// The model that produced this completion.
     model: String,
+}
+
+fn split_document_at_utf16_cursor(document: &str, cursor_position: u32) -> (&str, &str) {
+    let cursor = utf16_cursor_to_byte_index(document, cursor_position);
+    document.split_at(cursor)
+}
+
+fn utf16_cursor_to_byte_index(document: &str, cursor_position: u32) -> usize {
+    let target = cursor_position as usize;
+    let mut consumed = 0usize;
+
+    for (byte_index, ch) in document.char_indices() {
+        if consumed == target {
+            return byte_index;
+        }
+
+        consumed += ch.len_utf16();
+        if consumed >= target {
+            return byte_index + ch.len_utf8();
+        }
+    }
+
+    document.len()
+}
+
+fn inline_completion_messages(before_cursor: &str, after_cursor: &str) -> Vec<ChatMessage> {
+    vec![ChatMessage {
+        role: "user".to_string(),
+        content: format!(
+            "You are a code completion assistant. Given the code before and after the cursor, provide the most likely completion text. Return ONLY the completion text, nothing else. Do not repeat code that is already present before the cursor.\n\nCode before cursor:\n```\n{before}\n```\n\nCode after cursor:\n```\n{after}\n```\n\nComplete the code at the cursor position.",
+            before = before_cursor,
+            after = after_cursor,
+        ),
+    }]
 }
 
 /// Request inline code completion using the **active** provider and model.
@@ -609,24 +644,9 @@ async fn inline_completion(
     };
 
     let document = request.document;
-    let cursor = request.cursor_position as usize;
-    let before_cursor = &document[..cursor.min(document.len())];
-    let after_cursor = &document[cursor.min(document.len())..];
-
-    let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: "You are a code completion assistant. Given the code before and after the cursor, provide the most likely completion text. Return ONLY the completion text, nothing else. Do not repeat code that is already present before the cursor.".to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: format!(
-                "Code before cursor:\n```\n{before}\n```\n\nCode after cursor:\n```\n{after}\n```\n\nComplete the code at the cursor position.",
-                before = before_cursor,
-                after = after_cursor,
-            ),
-        },
-    ];
+    let (before_cursor, after_cursor) =
+        split_document_at_utf16_cursor(&document, request.cursor_position);
+    let messages = inline_completion_messages(before_cursor, after_cursor);
 
     let completion = provider
         .chat_once(&model, &messages, 0.3)
@@ -1211,24 +1231,9 @@ mod tests {
             (provider, active.model, provider_name)
         };
 
-        let cursor = cursor_position as usize;
-        let before_cursor = &document[..cursor.min(document.len())];
-        let after_cursor = &document[cursor.min(document.len())..];
-
-        let messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: "You are a code completion assistant. Given the code before and after the cursor, provide the most likely completion text. Return ONLY the completion text, nothing else. Do not repeat code that is already present before the cursor.".to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: format!(
-                    "Code before cursor:\n```\n{before}\n```\n\nCode after cursor:\n```\n{after}\n```\n\nComplete the code at the cursor position.",
-                    before = before_cursor,
-                    after = after_cursor,
-                ),
-            },
-        ];
+        let (before_cursor, after_cursor) =
+            split_document_at_utf16_cursor(document, cursor_position);
+        let messages = inline_completion_messages(before_cursor, after_cursor);
 
         let completion = provider
             .chat_once(&model, &messages, 0.3)
@@ -1240,6 +1245,37 @@ mod tests {
             provider_name,
             model,
         })
+    }
+
+    #[test]
+    fn inline_completion_splits_document_at_utf16_cursor_offset() {
+        let before = "let s = \"é\"";
+        let document = format!("{before};\nlet x = 1;");
+        let cursor = before.encode_utf16().count() as u32;
+
+        let (actual_before, actual_after) = split_document_at_utf16_cursor(&document, cursor);
+
+        assert_eq!(actual_before, before);
+        assert_eq!(actual_after, ";\nlet x = 1;");
+    }
+
+    #[test]
+    fn inline_completion_splits_document_after_non_bmp_utf16_pair() {
+        let document = "😀foo";
+        let cursor = "😀".encode_utf16().count() as u32;
+
+        let (before, after) = split_document_at_utf16_cursor(document, cursor);
+
+        assert_eq!(before, "😀");
+        assert_eq!(after, "foo");
+    }
+
+    #[test]
+    fn inline_completion_snaps_invalid_utf16_cursor_to_char_boundary() {
+        let (before, after) = split_document_at_utf16_cursor("😀foo", 1);
+
+        assert_eq!(before, "😀");
+        assert_eq!(after, "foo");
     }
 
     #[tokio::test]
@@ -1283,13 +1319,9 @@ mod tests {
 
         store.set_active(provider_id, "gpt-4o").unwrap();
 
-        let response = execute_inline_completion(
-            &store,
-            "fn main() {\n    let x = ",
-            23,
-        )
-        .await
-        .unwrap();
+        let response = execute_inline_completion(&store, "fn main() {\n    let x = ", 23)
+            .await
+            .unwrap();
 
         assert_eq!(response.completion, "let x = 42;");
         assert_eq!(response.provider_name, "Test");
@@ -1337,13 +1369,9 @@ mod tests {
 
         store.set_active(provider_id, "claude-sonnet").unwrap();
 
-        let response = execute_inline_completion(
-            &store,
-            "fn greet() {\n    ",
-            17,
-        )
-        .await
-        .unwrap();
+        let response = execute_inline_completion(&store, "fn greet() {\n    ", 17)
+            .await
+            .unwrap();
 
         assert_eq!(response.completion, "println!(\"hello\");");
         assert_eq!(response.provider_name, "Anthropic");
@@ -1361,6 +1389,13 @@ mod tests {
                 .unwrap(),
             "sk-anthropic"
         );
+
+        // Anthropic's Messages API rejects `system` inside `messages`, so the
+        // provider-agnostic inline prompt must stay user-only.
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"].as_str().unwrap(), "user");
     }
 
     #[tokio::test]
@@ -1483,12 +1518,26 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"].as_str().unwrap(), "user");
 
-        let user_content = messages[1]["content"].as_str().unwrap();
-        assert!(user_content.contains("Code before cursor:"), "Expected cursor context in user message, got: {user_content}");
-        assert!(user_content.contains("let x ="), "Expected before-cursor code in prompt, got: {user_content}");
-        assert!(user_content.contains("}"), "Expected after-cursor code in prompt, got: {user_content}");
+        let user_content = messages[0]["content"].as_str().unwrap();
+        assert!(
+            user_content.contains("Return ONLY the completion text"),
+            "Expected inline completion instructions in user message, got: {user_content}"
+        );
+        assert!(
+            user_content.contains("Code before cursor:"),
+            "Expected cursor context in user message, got: {user_content}"
+        );
+        assert!(
+            user_content.contains("let x ="),
+            "Expected before-cursor code in prompt, got: {user_content}"
+        );
+        assert!(
+            user_content.contains("}"),
+            "Expected after-cursor code in prompt, got: {user_content}"
+        );
 
         // Verify temperature is 0.3 (lower for completions).
         assert_eq!(body["temperature"], 0.3);
