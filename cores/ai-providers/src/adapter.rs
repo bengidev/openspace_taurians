@@ -763,6 +763,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_stops_when_channel_send_fails_mid_events() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].delta.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "secret-key".to_string());
+
+        // Create a channel that fails on the second send, simulating a
+        // receiver disconnect after the first token is delivered.
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let send_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let send_count_clone = send_count.clone();
+
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            let count = send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            if count >= 2 {
+                return Err(tauri::Error::WebviewNotFound);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let result = provider
+            .chat_stream(
+                "gpt-4o-mini",
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                0.7,
+                &channel,
+            )
+            .await;
+
+        // Stream should have returned a channel error.
+        assert!(result.is_err(), "expected channel error, got Ok(())");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("stream channel error"),
+            "unexpected error: {err_msg}"
+        );
+
+        // "b" is collected by the callback before it returns the error, so
+        // two tokens arrive. "c" and [DONE] are never processed because the
+        // send failure propagates out of `drain_complete_sse_events`.
+        let received = received.lock().unwrap();
+        assert_eq!(*received, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
     async fn streaming_response_pushes_tokens_through_channel() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

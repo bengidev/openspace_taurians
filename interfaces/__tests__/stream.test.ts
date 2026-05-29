@@ -219,4 +219,89 @@ describe("invokeStream", () => {
     expect(collector).toEqual(["a", "b", "c"]);
     expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
+
+  // ── AbortSignal tests ──────────────────────────────────────────
+
+  it("should throw AbortError when signal fires while waiting for items", async () => {
+    let resolveInvoke: () => void;
+    const invokePromise = new Promise<void>((resolve) => {
+      resolveInvoke = resolve;
+    });
+
+    mockInvoke.mockImplementation(
+      (_command: string, args: Record<string, unknown>) => {
+        // Send one item, then never complete until we resolve invokePromise
+        const channel = args.onEvent as MockChannelInstance;
+        setTimeout(() => channel.onmessage?.("before-abort"), 10);
+        return invokePromise;
+      },
+    );
+
+    const controller = new AbortController();
+    const items: unknown[] = [];
+
+    // Schedule the invoke resolution after the abort fires. The finally
+    // block in invokeStream awaits invokePromise, so it must settle.
+    setTimeout(() => resolveInvoke!(), 100);
+
+    await expect(async () => {
+      for await (const item of invokeStream("test_command", {}, {
+        signal: controller.signal,
+      })) {
+        items.push(item);
+        // Abort after receiving the first item
+        controller.abort();
+      }
+    }).rejects.toThrow();
+
+    expect(items).toEqual(["before-abort"]);
+  }, 10000);
+
+  it("should return immediately when signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const items: unknown[] = [];
+    for await (const item of invokeStream("test_command", {}, {
+      signal: controller.signal,
+    })) {
+      items.push(item);
+    }
+
+    expect(items).toEqual([]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("should clean up abort listener after completion", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+    const items: unknown[] = [];
+    for await (const item of invokeStream<number>("test_command", {}, {
+      signal: controller.signal,
+    })) {
+      items.push(item);
+    }
+
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  it("should clean up abort listener after error", async () => {
+    mockInvoke.mockRejectedValue(new Error("test error"));
+
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+    await expect(async () => {
+      for await (const item of invokeStream("test_command", {}, {
+        signal: controller.signal,
+      })) {
+        void item;
+      }
+    }).rejects.toThrow("test error");
+
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
 });

@@ -83,6 +83,62 @@ struct ProviderState {
     store: Mutex<ProviderStore>,
 }
 
+/// Cancellation state for the active chat stream.
+///
+/// When `chat_send_stream` starts, it stores a `oneshot::Sender` here
+/// along with a monotonically increasing generation id. The
+/// `chat_cancel` command fires that sender, causing `tokio::select!`
+/// to drop the stream future (which closes the HTTP connection).
+///
+/// The generation id guards against a stale clear: when a stream
+/// finishes naturally it only clears the slot if the slot still holds
+/// *its own* generation. A newer stream that registered in the meantime
+/// is left untouched, so `chat_cancel` keeps working on the latest one.
+struct ChatStreamState {
+    slot: Mutex<ChatStreamSlot>,
+}
+
+struct ChatStreamSlot {
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    generation: u64,
+}
+
+impl ChatStreamState {
+    fn new() -> Self {
+        Self {
+            slot: Mutex::new(ChatStreamSlot {
+                cancel: None,
+                generation: 0,
+            }),
+        }
+    }
+
+    fn register_cancel(&self, tx: tokio::sync::oneshot::Sender<()>) -> Result<u64, String> {
+        let mut slot = self.slot.lock().map_err(|e| e.to_string())?;
+        slot.generation = slot.generation.saturating_add(1);
+        slot.cancel = Some(tx);
+        Ok(slot.generation)
+    }
+
+    fn clear_cancel_if_generation(&self, generation: u64) -> Result<(), String> {
+        let mut slot = self.slot.lock().map_err(|e| e.to_string())?;
+        if slot.generation == generation {
+            slot.cancel = None;
+        }
+        Ok(())
+    }
+
+    fn cancel_active(&self) -> Result<bool, String> {
+        let mut slot = self.slot.lock().map_err(|e| e.to_string())?;
+        if let Some(tx) = slot.cancel.take() {
+            let _ = tx.send(());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 impl ProviderState {
     fn new<R: Runtime>(app: &tauri::App<R>) -> Result<Self, String> {
         let data_dir = app
@@ -400,15 +456,21 @@ async fn provider_chat_stream(
 /// The chat feature calls this command so it never needs to know which
 /// provider is selected — it simply passes user messages and receives
 /// tokens through the channel.
+///
+/// The stream can be cancelled via [`chat_cancel`], which fires a
+/// `oneshot` token. `tokio::select!` races the stream against the
+/// cancel signal; when cancelled, the stream future is dropped, which
+/// drops the `reqwest::Response` and closes the HTTP connection.
 #[tauri::command]
 async fn chat_send_stream(
     messages: Vec<ChatMessage>,
     temperature: Option<f64>,
     on_token: tauri::ipc::Channel<String>,
-    state: tauri::State<'_, ProviderState>,
+    provider_state: tauri::State<'_, ProviderState>,
+    stream_state: tauri::State<'_, ChatStreamState>,
 ) -> Result<(), String> {
     let (provider, model) = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let store = provider_state.store.lock().map_err(|e| e.to_string())?;
 
         let active = store.get_active().map_err(|e| e.to_string())?;
         let active = active.ok_or(
@@ -430,20 +492,46 @@ async fn chat_send_stream(
     };
 
     let channel = Channel::from_tauri(on_token);
+    let temp = temperature.unwrap_or(0.7);
 
-    provider
-        .chat_stream(
-            &model,
-            &messages,
-            temperature.unwrap_or(0.7),
-            &channel,
-        )
-        .await
-        .map_err(|e| e.to_string())
+    // Register a cancellation token so `chat_cancel` can stop the stream.
+    // Each registration bumps the generation under the same mutex as the
+    // sender write, so the generation always identifies the sender currently
+    // in the slot.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let my_generation = stream_state.register_cancel(cancel_tx)?;
+
+    let result = tokio::select! {
+        result = provider.chat_stream(&model, &messages, temp, &channel) => {
+            result.map_err(|e| e.to_string())
+        }
+        _ = cancel_rx => {
+            // Graceful cancellation — the stream future is dropped here,
+            // which drops the reqwest::Response and closes the HTTP connection.
+            Ok(())
+        }
+    };
+
+    // Clear the cancel token — but only if we still own the slot. A newer
+    // stream may have registered (and bumped the generation) while this one
+    // was finishing; in that case we must not null out its token.
+    stream_state.clear_cancel_if_generation(my_generation)?;
+
+    result
+}
+
+/// Cancel the currently active chat stream, if any.
+///
+/// Returns `true` if a stream was cancelled, `false` if no stream was active.
+#[tauri::command]
+fn chat_cancel(stream_state: tauri::State<'_, ChatStreamState>) -> Result<bool, String> {
+    stream_state.cancel_active()
 }
 
 #[tauri::command]
-fn active_provider_get(state: tauri::State<'_, ProviderState>) -> Result<Option<ActiveProvider>, String> {
+fn active_provider_get(
+    state: tauri::State<'_, ProviderState>,
+) -> Result<Option<ActiveProvider>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.get_active().map_err(|e| e.to_string())
 }
@@ -455,7 +543,9 @@ fn active_provider_set(
     state: tauri::State<'_, ProviderState>,
 ) -> Result<(), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    store.set_active(provider_id, &model).map_err(|e| e.to_string())
+    store
+        .set_active(provider_id, &model)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -470,6 +560,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::new(AppState::new()))
+        .manage(ChatStreamState::new())
         .invoke_handler(tauri::generate_handler![
             open_panel,
             close_panel,
@@ -484,6 +575,7 @@ fn main() {
             provider_test_connection,
             provider_chat_stream,
             chat_send_stream,
+            chat_cancel,
             active_provider_get,
             active_provider_set,
             active_provider_clear,
@@ -741,13 +833,268 @@ mod tests {
         }];
 
         // Stream completes successfully but no tokens are extracted.
-        execute_chat(&store, messages, 0.7, &channel)
-            .await
-            .unwrap();
+        execute_chat(&store, messages, 0.7, &channel).await.unwrap();
 
         assert!(
             received.lock().unwrap().is_empty(),
             "Expected zero tokens when response path does not match"
         );
+    }
+
+    // ── Cancellation tests ────────────────────────────────────────
+
+    /// Resolve the active provider from the store, returning the owned
+    /// `AiProvider` and model string. Panics if no active provider is set.
+    fn resolve_active(store: &ProviderStore) -> (ai_providers::AiProvider, String) {
+        let active = store
+            .get_active()
+            .expect("get_active failed")
+            .expect("no active provider");
+        let provider = store
+            .ai_provider(active.provider_id)
+            .expect("ai_provider failed")
+            .expect("provider not found");
+        (provider, active.model)
+    }
+
+    #[tokio::test]
+    async fn chat_cancel_returns_false_when_no_stream_active() {
+        let state = ChatStreamState::new();
+        assert!(
+            !state.cancel_active().unwrap(),
+            "expected false when no stream is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_cancel_returns_true_when_stream_is_active() {
+        let state = ChatStreamState::new();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        state.register_cancel(cancel_tx).unwrap();
+
+        assert!(
+            state.cancel_active().unwrap(),
+            "expected true when a stream is active"
+        );
+        assert!(
+            cancel_rx.await.is_ok(),
+            "expected registered cancel receiver to be fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_stream_cleanup_does_not_clear_newer_cancel_token() {
+        let state = ChatStreamState::new();
+        let (first_tx, _first_rx) = tokio::sync::oneshot::channel::<()>();
+        let first_generation = state.register_cancel(first_tx).unwrap();
+
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel::<()>();
+        state.register_cancel(second_tx).unwrap();
+
+        // The first stream finishes after a newer stream registered. Its
+        // cleanup must not clear the newer stream's token.
+        state.clear_cancel_if_generation(first_generation).unwrap();
+
+        assert!(
+            state.cancel_active().unwrap(),
+            "newer cancel token should remain active after stale cleanup"
+        );
+        assert!(
+            second_rx.await.is_ok(),
+            "expected newer cancel receiver to be fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_cancellation_stops_reading() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A mock server that responds with a large SSE stream. The cancel
+        // signal fires before the adapter can process all events, so we
+        // expect fewer tokens than the server sent.
+        let server = MockServer::start().await;
+        let sse_body: String = (0..100)
+            .map(|i| {
+                format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"t{i}\"}}}}]}}\n\n",
+                    i = i
+                )
+            })
+            .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+            .collect();
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].delta.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(1, "gpt-4o").unwrap();
+
+        // Resolve the provider before spawning so we don't hold &ProviderStore
+        // across a Send boundary (ProviderStore contains RefCell).
+        let (provider, model) = resolve_active(&store);
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+
+        // Fire the cancel signal *before* spawning the stream. The first time
+        // the spawned task is polled, `cancel_rx` is already ready, so
+        // `tokio::select!` takes the cancel branch and drops the stream
+        // future. This makes the truncation deterministic: the provider
+        // stream is dropped before it can drain all 100 events.
+        cancel_tx.send(()).unwrap();
+
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => {
+                    Ok(()) // Graceful cancellation
+                }
+                result = provider.chat_stream(&model, &messages, 0.7, &channel) => {
+                    result.map_err(|e| e.to_string())
+                }
+            }
+        });
+
+        let result = handle.await.unwrap();
+        // Cancellation is graceful — no error.
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+
+        // The stream was cancelled before completion, so strictly fewer than
+        // all 100 tokens were delivered. (`biased` + pre-fired cancel ensures
+        // the cancel branch wins the first poll.)
+        let count = received.lock().unwrap().len();
+        assert!(
+            count < 100,
+            "stream should have been cancelled before completion, got {count} tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_receiver_disconnect_stops_reading() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"C\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].delta.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(1, "gpt-4o").unwrap();
+
+        // Channel that fails on the second send (simulating receiver disconnect).
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let send_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let send_count_clone = send_count.clone();
+
+        let tauri_channel = tauri::ipc::Channel::<String>::new(move |body| {
+            let count = send_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if let tauri::ipc::InvokeResponseBody::Json(s) = body {
+                let item: String = serde_json::from_str(&s).unwrap();
+                received_clone.lock().unwrap().push(item);
+            }
+            if count >= 2 {
+                return Err(tauri::Error::WebviewNotFound);
+            }
+            Ok(())
+        });
+        let channel = Channel::from_tauri(tauri_channel);
+
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }];
+
+        let result = execute_chat(&store, messages, 0.7, &channel).await;
+
+        // Stream should have returned a channel error.
+        assert!(result.is_err(), "expected channel error from disconnect");
+
+        // "A" was delivered, "B" collected before the callback returned Err.
+        let received = received.lock().unwrap();
+        assert_eq!(*received, vec!["A".to_string(), "B".to_string()]);
     }
 }

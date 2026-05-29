@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, Mock } from "vitest";
-import { chatSend } from "../lib/api/providers";
+import { chatSend, chatCancel } from "../lib/api/providers";
 
 interface MockChannelInstance {
   onmessage: ((message: unknown) => void) | null;
@@ -111,5 +111,55 @@ describe("chatSend", () => {
     }
 
     expect(tokens).toEqual([]);
+  });
+
+  it("passes signal through to invokeStream", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+
+    const controller = new AbortController();
+    const tokens: string[] = [];
+    for await (const token of chatSend({
+      messages: [{ role: "user", content: "test" }],
+      signal: controller.signal,
+    })) {
+      tokens.push(token);
+    }
+
+    expect(mockInvoke).toHaveBeenCalledWith("chat_send_stream", {
+      messages: [{ role: "user", content: "test" }],
+      temperature: 0.7,
+      onToken: expect.any(Object),
+    });
+    expect(tokens).toEqual([]);
+  });
+});
+
+// ── chatCancel ────────────────────────────────────────────────────
+
+describe("chatCancel", () => {
+  let mockInvoke: Mock;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    const tauriCore = await import("@tauri-apps/api/core");
+    mockInvoke = tauriCore.invoke as Mock;
+  });
+
+  it("calls chat_cancel and returns true when a stream was active", async () => {
+    mockInvoke.mockResolvedValue(true);
+
+    const result = await chatCancel();
+
+    expect(result).toBe(true);
+    expect(mockInvoke).toHaveBeenCalledWith("chat_cancel");
+  });
+
+  it("calls chat_cancel and returns false when no stream was active", async () => {
+    mockInvoke.mockResolvedValue(false);
+
+    const result = await chatCancel();
+
+    expect(result).toBe(false);
+    expect(mockInvoke).toHaveBeenCalledWith("chat_cancel");
   });
 });

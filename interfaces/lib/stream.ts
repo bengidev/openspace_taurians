@@ -16,6 +16,17 @@ export interface InvokeStreamOptions {
    * Defaults to "onEvent".
    */
   channelParam?: string;
+
+  /**
+   * Optional AbortSignal to cancel the stream.
+   *
+   * When the signal fires, the async iterator stops yielding and throws
+   * an `AbortError`. The underlying Tauri command continues until it
+   * finishes naturally or the channel's `send()` fails (because the JS
+   * side stops reading). For full cancellation, use `chat_cancel` to
+   * also stop the Rust-side stream.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -64,6 +75,12 @@ export async function* invokeStream<T>(
   options?: InvokeStreamOptions
 ): AsyncIterable<T> {
   const channelParam = options?.channelParam ?? "onEvent";
+  const signal = options?.signal;
+
+  // Early exit if already aborted before we start.
+  if (signal?.aborted) {
+    return;
+  }
 
   // Buffer to hold items that arrive before the consumer calls next()
   const buffer: T[] = [];
@@ -73,6 +90,22 @@ export async function* invokeStream<T>(
   let done = false;
   // Error that occurred during streaming, if any
   let error: Error | null = null;
+
+  // Abort signal handler — wakes any pending waiter so the generator loop
+  // can see the abort and exit cleanly.
+  const onAbort = () => {
+    done = true;
+    error =
+      signal!.reason instanceof Error
+        ? signal!.reason
+        : new DOMException("The operation was aborted.", "AbortError");
+    if (waiter) {
+      const resolve = waiter;
+      waiter = null;
+      resolve({ value: undefined, done: true });
+    }
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   // Create the channel that will receive items from the Rust side
   const channel = new Channel<T>();
@@ -150,6 +183,7 @@ export async function* invokeStream<T>(
       }
     }
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     // Ensure the invoke promise settles to avoid unhandled rejections
     await invokePromise.catch(() => {});
   }

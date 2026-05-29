@@ -43,6 +43,12 @@ export async function activeProviderClear(): Promise<boolean> {
 export interface ChatSendOptions {
   messages: ChatMessage[];
   temperature?: number;
+  /**
+   * Optional AbortSignal to cancel the stream from the JS side.
+   * For full cancellation (stopping the Rust-side HTTP read), also call
+   * {@link chatCancel}.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -53,6 +59,7 @@ export interface ChatSendOptions {
  *
  * @throws if no active provider is configured or if the provider
  *         returns an error (bad response path, auth failure, etc.).
+ * @throws {DOMException} with name "AbortError" if the signal is aborted.
  */
 export async function* chatSend(
   options: ChatSendOptions,
@@ -63,6 +70,17 @@ export async function* chatSend(
       messages: options.messages,
       temperature: options.temperature ?? 0.7,
     },
-    { channelParam: "onToken" },
+    { channelParam: "onToken", signal: options.signal },
   );
+}
+
+/**
+ * Cancel the currently active chat stream, if any.
+ *
+ * Returns `true` if a stream was cancelled, `false` if no stream was
+ * active. This fires the Rust-side cancellation token, which drops the
+ * stream future and closes the HTTP connection immediately.
+ */
+export async function chatCancel(): Promise<boolean> {
+  return invoke("chat_cancel");
 }
