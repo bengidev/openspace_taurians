@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import { chatSend, activeProviderGet } from "@/lib/api/providers";
+import { chatSend, chatCancel, activeProviderGet } from "@/lib/api/providers";
 import type { ActiveProvider, ChatMessage } from "@/lib/types/provider";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -17,10 +17,12 @@ export interface ChatState {
   error: string | null;
   activeProvider: ActiveProvider | null;
   providerLoaded: boolean;
+  abortController: AbortController | null;
 
   // Actions
   loadActiveProvider: () => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
+  cancelStream: () => void;
   clearMessages: () => void;
   clearError: () => void;
 }
@@ -33,6 +35,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   error: null,
   activeProvider: null,
   providerLoaded: false,
+  abortController: null,
 
   loadActiveProvider: async () => {
     try {
@@ -53,6 +56,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       return;
     }
 
+    // Cancel any previous stream still in flight.
+    state.abortController?.abort();
+
+    const abortController = new AbortController();
+
     const userMessage: ChatMessageState = { role: "user", content };
     const assistantMessage: ChatMessageState = { role: "assistant", content: "" };
 
@@ -60,6 +68,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       messages: [...s.messages, userMessage, assistantMessage],
       isLoading: true,
       error: null,
+      abortController,
     }));
 
     try {
@@ -69,7 +78,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         { role: "user", content },
       ];
 
-      for await (const token of chatSend({ messages: history })) {
+      for await (const token of chatSend({
+        messages: history,
+        signal: abortController.signal,
+      })) {
         set((s) => {
           const messages = [...s.messages];
           const last = messages[messages.length - 1];
@@ -83,22 +95,57 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      set((s) => {
-        const messages = [...s.messages];
-        const last = messages[messages.length - 1];
-        if (last && last.role === "assistant" && last.content === "") {
-          // Remove the empty assistant placeholder on failure.
-          messages.pop();
-        }
-        return { messages, error: message };
-      });
+      // If the stream was aborted, silently remove the empty placeholder
+      // and don't surface an error — the user initiated the cancellation.
+      if (abortController.signal.aborted) {
+        set((s) => {
+          const messages = [...s.messages];
+          const last = messages[messages.length - 1];
+          if (last && last.role === "assistant" && last.content === "") {
+            messages.pop();
+          }
+          return { messages };
+        });
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        set((s) => {
+          const messages = [...s.messages];
+          const last = messages[messages.length - 1];
+          if (last && last.role === "assistant" && last.content === "") {
+            // Remove the empty assistant placeholder on failure.
+            messages.pop();
+          }
+          return { messages, error: message };
+        });
+      }
     } finally {
-      set({ isLoading: false });
+      // Only clear loading state if this is still the active controller.
+      // A subsequent sendMessage may have replaced it.
+      if (get().abortController === abortController) {
+        set({ isLoading: false, abortController: null });
+      }
     }
   },
 
-  clearMessages: () => set({ messages: [], error: null }),
+  cancelStream: () => {
+    const { abortController } = get();
+    if (abortController) {
+      abortController.abort();
+      // Also cancel on the Rust side so the HTTP connection is dropped
+      // immediately instead of waiting for the channel send to fail.
+      chatCancel().catch(() => {});
+    }
+  },
+
+  clearMessages: () => {
+    // Cancel any active stream before clearing.
+    const { abortController } = get();
+    if (abortController) {
+      abortController.abort();
+      chatCancel().catch(() => {});
+    }
+    set({ messages: [], error: null, isLoading: false, abortController: null });
+  },
 
   clearError: () => set({ error: null }),
 }));

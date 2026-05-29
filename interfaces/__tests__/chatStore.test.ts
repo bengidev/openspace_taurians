@@ -103,13 +103,15 @@ describe("chatStore", () => {
 
     await useChatStore.getState().sendMessage("second");
 
-    expect(chatSend).toHaveBeenCalledWith({
-      messages: [
-        { role: "user", content: "first" },
-        { role: "assistant", content: "reply" },
-        { role: "user", content: "second" },
-      ],
-    });
+    expect(chatSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: "user", content: "first" },
+          { role: "assistant", content: "reply" },
+          { role: "user", content: "second" },
+        ],
+      }),
+    );
   });
 
   it("sendMessage removes empty assistant placeholder on error", async () => {
