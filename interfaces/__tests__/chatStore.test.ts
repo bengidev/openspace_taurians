@@ -3,11 +3,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mock the providers API module used by chatStore.
 vi.mock("@/lib/api/providers", () => ({
   chatSend: vi.fn(),
+  chatCancel: vi.fn().mockResolvedValue(false),
   activeProviderGet: vi.fn(),
 }));
 
 import { useChatStore } from "@/stores/chatStore";
-import { chatSend, activeProviderGet } from "@/lib/api/providers";
+import { chatSend, chatCancel, activeProviderGet } from "@/lib/api/providers";
 
 function mockChatSend(tokens: string[]) {
   vi.mocked(chatSend).mockImplementation(async function* () {
@@ -165,5 +166,129 @@ describe("chatStore", () => {
     await useChatStore.getState().sendMessage("should be ignored");
 
     expect(chatSend).not.toHaveBeenCalled();
+  });
+
+  // ── Cancellation tests ───────────────────────────────────────────
+
+  /** Mock chatSend as a slow generator that respects AbortSignal. */
+  function mockChatSendSlow(tokens: string[], delayMs = 50) {
+    vi.mocked(chatSend).mockImplementation(async function* ({
+      signal,
+    }: {
+      signal?: AbortSignal;
+    }) {
+      for (const token of tokens) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, delayMs);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new DOMException("The operation was aborted.", "AbortError"),
+              );
+            },
+            { once: true },
+          );
+        });
+        yield token;
+      }
+    });
+  }
+
+  it("cancelStream aborts the controller and calls chatCancel", async () => {
+    useChatStore.setState({
+      activeProvider: { provider_id: 1, model: "gpt-4o" },
+      providerLoaded: true,
+    });
+    mockChatSendSlow(["Hello", " world", "!"], 100);
+
+    const sendPromise = useChatStore.getState().sendMessage("hi");
+
+    // Wait for the stream to start producing.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(useChatStore.getState().isLoading).toBe(true);
+
+    // Cancel mid-stream.
+    useChatStore.getState().cancelStream();
+
+    await sendPromise;
+
+    expect(vi.mocked(chatCancel)).toHaveBeenCalled();
+    expect(useChatStore.getState().isLoading).toBe(false);
+    expect(useChatStore.getState().abortController).toBeNull();
+  });
+
+  it("clearMessages cancels any active stream", async () => {
+    useChatStore.setState({
+      activeProvider: { provider_id: 1, model: "gpt-4o" },
+      providerLoaded: true,
+    });
+    mockChatSendSlow(["Hello", " world"], 100);
+
+    const sendPromise = useChatStore.getState().sendMessage("hi");
+    await new Promise((r) => setTimeout(r, 20));
+
+    useChatStore.getState().clearMessages();
+    await sendPromise;
+
+    expect(useChatStore.getState().messages).toHaveLength(0);
+    expect(useChatStore.getState().isLoading).toBe(false);
+    expect(vi.mocked(chatCancel)).toHaveBeenCalled();
+  });
+
+  it("sendMessage silently handles abort errors without surfacing error message", async () => {
+    useChatStore.setState({
+      activeProvider: { provider_id: 1, model: "gpt-4o" },
+      providerLoaded: true,
+    });
+    mockChatSendSlow(["partial"], 200);
+
+    const sendPromise = useChatStore.getState().sendMessage("hello");
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Cancel — this sets signal.aborted=true and throws AbortError inside
+    // the generator, which sendMessage's catch block silently handles.
+    useChatStore.getState().cancelStream();
+    await sendPromise;
+
+    const state = useChatStore.getState();
+    expect(state.error).toBeNull();
+    // Empty assistant placeholder should be removed.
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toEqual({ role: "user", content: "hello" });
+    expect(state.isLoading).toBe(false);
+  });
+
+  it("sendMessage creates a fresh AbortController for each stream", async () => {
+    useChatStore.setState({
+      activeProvider: { provider_id: 1, model: "gpt-4o" },
+      providerLoaded: true,
+    });
+    mockChatSend(["ok"]);
+
+    await useChatStore.getState().sendMessage("first");
+
+    // Controller should be cleaned up after the stream finishes.
+    expect(useChatStore.getState().abortController).toBeNull();
+    expect(useChatStore.getState().isLoading).toBe(false);
+  });
+
+  it("sendMessage passes signal to chatSend", async () => {
+    useChatStore.setState({
+      activeProvider: { provider_id: 1, model: "gpt-4o" },
+      providerLoaded: true,
+    });
+    mockChatSend(["ok"]);
+
+    await useChatStore.getState().sendMessage("test");
+
+    expect(chatSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 });
