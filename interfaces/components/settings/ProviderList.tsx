@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ActiveProvider, Provider, ProviderTestResult } from "@/lib/types/provider";
 import { providerTestConnection } from "@/lib/api/providers";
 
@@ -64,10 +64,13 @@ function ProviderCard({
 
   const hasModels = provider.models.length > 0;
   const isMissingKey = !provider.has_api_key;
-  const selectedModel =
-    isActive && activeModel && provider.models.some((m) => m.id === activeModel)
-      ? activeModel
-      : chosenModel;
+  const selectedModel = useMemo(
+    () =>
+      isActive && activeModel && provider.models.some((m) => m.id === activeModel)
+        ? activeModel
+        : chosenModel,
+    [isActive, activeModel, provider.models, chosenModel]
+  );
 
   async function handleTest() {
     setTesting(true);
