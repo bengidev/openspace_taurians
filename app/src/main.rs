@@ -554,6 +554,92 @@ fn active_provider_clear(state: tauri::State<'_, ProviderState>) -> Result<bool,
     store.clear_active().map_err(|e| e.to_string())
 }
 
+// ── Inline completion ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+struct InlineCompletionRequest {
+    /// The full document text surrounding the cursor.
+    document: String,
+    /// Zero-based cursor offset in the document.
+    cursor_position: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct InlineCompletionResponse {
+    /// The completion text suggested by the provider.
+    completion: String,
+    /// The provider name that produced this completion.
+    provider_name: String,
+    /// The model that produced this completion.
+    model: String,
+}
+
+/// Request inline code completion using the **active** provider and model.
+///
+/// Sends the document context through the same generic provider adapter
+/// used by chat. Inline completion does not need to know which provider
+/// is behind the adapter — it simply passes document context and receives
+/// a completion string.
+#[tauri::command]
+async fn inline_completion(
+    request: InlineCompletionRequest,
+    state: tauri::State<'_, ProviderState>,
+) -> Result<InlineCompletionResponse, String> {
+    let (provider, model, provider_name) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+
+        let active = store.get_active().map_err(|e| e.to_string())?;
+        let active = active.ok_or(
+            "No active provider configured. Open Settings → Providers to choose a provider and model.",
+        )?;
+
+        let provider = store
+            .ai_provider(active.provider_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "Active provider '{}' not found. It may have been deleted. \
+                     Open Settings → Providers to select a new one.",
+                    active.provider_id
+                )
+            })?;
+
+        let provider_name = provider.config().name.clone();
+        (provider, active.model, provider_name)
+    };
+
+    let document = request.document;
+    let cursor = request.cursor_position as usize;
+    let before_cursor = &document[..cursor.min(document.len())];
+    let after_cursor = &document[cursor.min(document.len())..];
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are a code completion assistant. Given the code before and after the cursor, provide the most likely completion text. Return ONLY the completion text, nothing else. Do not repeat code that is already present before the cursor.".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Code before cursor:\n```\n{before}\n```\n\nCode after cursor:\n```\n{after}\n```\n\nComplete the code at the cursor position.",
+                before = before_cursor,
+                after = after_cursor,
+            ),
+        },
+    ];
+
+    let completion = provider
+        .chat_once(&model, &messages, 0.3)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(InlineCompletionResponse {
+        completion,
+        provider_name,
+        model,
+    })
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 fn main() {
@@ -579,6 +665,7 @@ fn main() {
             active_provider_get,
             active_provider_set,
             active_provider_clear,
+            inline_completion,
         ])
         .setup(|app| {
             app.manage(ProviderState::new(app)?);
@@ -1096,5 +1183,314 @@ mod tests {
         // "A" was delivered, "B" collected before the callback returned Err.
         let received = received.lock().unwrap();
         assert_eq!(*received, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    // ── Inline completion tests ──────────────────────────────────
+
+    /// Core inline completion logic extracted for direct testing without Tauri
+    /// command wrapper overhead. This mirrors what `inline_completion` does:
+    /// read active → resolve provider → send a one-shot request through the
+    /// generic adapter and return the completion text.
+    async fn execute_inline_completion(
+        store: &ProviderStore,
+        document: &str,
+        cursor_position: u32,
+    ) -> Result<InlineCompletionResponse, String> {
+        let (provider, model, provider_name) = {
+            let active = store
+                .get_active()
+                .map_err(|e| e.to_string())?
+                .ok_or("No active provider configured")?;
+
+            let provider = store
+                .ai_provider(active.provider_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("provider '{}' not found", active.provider_id))?;
+
+            let provider_name = provider.config().name.clone();
+            (provider, active.model, provider_name)
+        };
+
+        let cursor = cursor_position as usize;
+        let before_cursor = &document[..cursor.min(document.len())];
+        let after_cursor = &document[cursor.min(document.len())..];
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a code completion assistant. Given the code before and after the cursor, provide the most likely completion text. Return ONLY the completion text, nothing else. Do not repeat code that is already present before the cursor.".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "Code before cursor:\n```\n{before}\n```\n\nCode after cursor:\n```\n{after}\n```\n\nComplete the code at the cursor position.",
+                    before = before_cursor,
+                    after = after_cursor,
+                ),
+            },
+        ];
+
+        let completion = provider
+            .chat_once(&model, &messages, 0.3)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(InlineCompletionResponse {
+            completion,
+            provider_name,
+            model,
+        })
+    }
+
+    #[tokio::test]
+    async fn inline_completion_returns_completion_from_active_provider() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "let x = 42;"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        let provider_id = store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].message.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(provider_id, "gpt-4o").unwrap();
+
+        let response = execute_inline_completion(
+            &store,
+            "fn main() {\n    let x = ",
+            23,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.completion, "let x = 42;");
+        assert_eq!(response.provider_name, "Test");
+        assert_eq!(response.model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn inline_completion_uses_active_provider_not_hardcoded() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"text": "println!(\"hello\");"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        // Create an Anthropic-like provider and make it active.
+        let provider_id = store
+            .create(ai_providers::NewProviderConfig {
+                name: "Anthropic".to_string(),
+                base_url: format!("{}/v1/messages", server.uri()),
+                api_key: Some("sk-anthropic".to_string()),
+                auth_header_name: Some("x-api-key".to_string()),
+                auth_header_value_prefix: Some(String::new()),
+                models: vec![ModelInfo {
+                    id: "claude-sonnet".to_string(),
+                    name: "Claude Sonnet".to_string(),
+                    context_window: 200000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "max_tokens": 1024,
+                }),
+                response_path: "content[0].text".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(provider_id, "claude-sonnet").unwrap();
+
+        let response = execute_inline_completion(
+            &store,
+            "fn greet() {\n    ",
+            17,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.completion, "println!(\"hello\");");
+        assert_eq!(response.provider_name, "Anthropic");
+        assert_eq!(response.model, "claude-sonnet");
+
+        // Verify the request was sent with Anthropic's auth header.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-api-key")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "sk-anthropic"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_completion_returns_clear_error_when_no_active_provider() {
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+        store.seed_default_profiles().unwrap();
+
+        let error = execute_inline_completion(&store, "fn main() {}", 0)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("No active provider"),
+            "Expected clear no-provider message, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_completion_returns_error_when_response_path_does_not_match() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Return a response whose structure doesn't match the configured
+        // response_path.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "unexpected": "structure"
+            })))
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "model-x".to_string(),
+                    name: "Model X".to_string(),
+                    context_window: 4096,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].message.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(1, "model-x").unwrap();
+
+        let error = execute_inline_completion(&store, "code", 0)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("response path"),
+            "Expected response path error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_completion_sends_cursor_context_to_provider() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "completed"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let test_dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::in_memory(test_dir.path()).unwrap();
+
+        store
+            .create(ai_providers::NewProviderConfig {
+                name: "Test".to_string(),
+                base_url: format!("{}/v1/chat/completions", server.uri()),
+                api_key: Some("sk-test".to_string()),
+                auth_header_name: None,
+                auth_header_value_prefix: None,
+                models: vec![ModelInfo {
+                    id: "gpt-4o".to_string(),
+                    name: "GPT-4o".to_string(),
+                    context_window: 128000,
+                }],
+                request_body_template: serde_json::json!({
+                    "model": "{model}",
+                    "messages": "{messages}",
+                    "stream": "{stream}",
+                    "temperature": "{temperature}"
+                }),
+                response_path: "choices[0].message.content".to_string(),
+            })
+            .unwrap();
+
+        store.set_active(1, "gpt-4o").unwrap();
+
+        let document = "fn main() {\n    let x = \n}";
+        let cursor = 23; // after "let x = "
+        execute_inline_completion(&store, document, cursor)
+            .await
+            .unwrap();
+
+        // Verify the request body contains the cursor context.
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+
+        let user_content = messages[1]["content"].as_str().unwrap();
+        assert!(user_content.contains("Code before cursor:"), "Expected cursor context in user message, got: {user_content}");
+        assert!(user_content.contains("let x ="), "Expected before-cursor code in prompt, got: {user_content}");
+        assert!(user_content.contains("}"), "Expected after-cursor code in prompt, got: {user_content}");
+
+        // Verify temperature is 0.3 (lower for completions).
+        assert_eq!(body["temperature"], 0.3);
     }
 }
