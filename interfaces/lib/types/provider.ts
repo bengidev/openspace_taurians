@@ -69,3 +69,21 @@ export interface ChatMessage {
   role: string;
   content: string;
 }
+
+// ── Inline completion types ──────────────────────────────────────
+
+export interface InlineCompletionRequest {
+  /** The full document text surrounding the cursor. */
+  document: string;
+  /** Zero-based cursor offset in UTF-16 code units, matching browser/editor offsets such as textarea selectionStart. */
+  cursor_position: number;
+}
+
+export interface InlineCompletionResponse {
+  /** The completion text suggested by the provider. */
+  completion: string;
+  /** The provider name that produced this completion. */
+  provider_name: string;
+  /** The model that produced this completion. */
+  model: string;
+}
