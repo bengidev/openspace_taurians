@@ -131,6 +131,7 @@ struct ProviderResponse {
     name: String,
     base_url: String,
     api_key_redacted: String,
+    has_api_key: bool,
     auth_header_name: String,
     auth_header_value_prefix: String,
     models: Vec<ModelInfo>,
@@ -140,11 +141,14 @@ struct ProviderResponse {
 
 impl From<ProviderConfig> for ProviderResponse {
     fn from(provider: ProviderConfig) -> Self {
+        let has_api_key = provider.has_api_key();
+
         Self {
             id: provider.id,
             name: provider.name,
             base_url: provider.base_url,
             api_key_redacted: "[REDACTED]".to_string(),
+            has_api_key,
             auth_header_name: provider.auth_header_name,
             auth_header_value_prefix: provider.auth_header_value_prefix,
             models: provider.models,
@@ -441,4 +445,46 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_with_key(api_key_encrypted: Option<Vec<u8>>) -> ProviderConfig {
+        ProviderConfig {
+            id: 1,
+            name: "Test".to_string(),
+            base_url: "https://example.com".to_string(),
+            api_key_encrypted,
+            auth_header_name: "Authorization".to_string(),
+            auth_header_value_prefix: "Bearer ".to_string(),
+            models: vec![],
+            request_body_template: serde_json::json!({}),
+            response_path: "choices.0.message.content".to_string(),
+        }
+    }
+
+    #[test]
+    fn provider_response_exposes_has_api_key_true_when_key_present() {
+        let response = ProviderResponse::from(provider_with_key(Some(vec![1, 2, 3])));
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["has_api_key"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn provider_response_marks_keyless_provider_unusable() {
+        let none = ProviderResponse::from(provider_with_key(None));
+        let empty = ProviderResponse::from(provider_with_key(Some(vec![])));
+        assert!(!none.has_api_key);
+        assert!(!empty.has_api_key);
+    }
+
+    #[test]
+    fn provider_response_never_serializes_real_api_key() {
+        let response = ProviderResponse::from(provider_with_key(Some(vec![1, 2, 3])));
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["api_key_redacted"], serde_json::json!("[REDACTED]"));
+        assert!(json.get("api_key_encrypted").is_none());
+    }
 }

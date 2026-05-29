@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import type { ActiveProvider, Provider, ProviderTestResult } from "@/lib/types/provider";
 import { providerTestConnection } from "@/lib/api/providers";
 
@@ -60,18 +60,17 @@ function ProviderCard({
 }) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null);
-  const [selectedModel, setSelectedModel] = useState(
-    activeModel ?? provider.models[0]?.id ?? ""
-  );
-
-  useEffect(() => {
-    if (isActive && activeModel && provider.models.some((m) => m.id === activeModel)) {
-      setSelectedModel(activeModel);
-    }
-  }, [isActive, activeModel, provider.models]);
+  const [chosenModel, setChosenModel] = useState(provider.models[0]?.id ?? "");
 
   const hasModels = provider.models.length > 0;
   const isMissingKey = !provider.has_api_key;
+  const selectedModel = useMemo(
+    () =>
+      isActive && activeModel && provider.models.some((m) => m.id === activeModel)
+        ? activeModel
+        : chosenModel,
+    [isActive, activeModel, provider.models, chosenModel]
+  );
 
   async function handleTest() {
     setTesting(true);
@@ -87,7 +86,7 @@ function ProviderCard({
   }
 
   function handleSetModel(model: string) {
-    setSelectedModel(model);
+    setChosenModel(model);
   }
 
   return (
