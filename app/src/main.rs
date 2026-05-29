@@ -83,6 +83,23 @@ struct ProviderState {
     store: Mutex<ProviderStore>,
 }
 
+/// Cancellation state for the active chat stream.
+///
+/// When `chat_send_stream` starts, it stores a `oneshot::Sender` here.
+/// The `chat_cancel` command fires that sender, causing `tokio::select!`
+/// to drop the stream future (which closes the HTTP connection).
+struct ChatStreamState {
+    cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl ChatStreamState {
+    fn new() -> Self {
+        Self {
+            cancel: Mutex::new(None),
+        }
+    }
+}
+
 impl ProviderState {
     fn new<R: Runtime>(app: &tauri::App<R>) -> Result<Self, String> {
         let data_dir = app
@@ -400,15 +417,21 @@ async fn provider_chat_stream(
 /// The chat feature calls this command so it never needs to know which
 /// provider is selected — it simply passes user messages and receives
 /// tokens through the channel.
+///
+/// The stream can be cancelled via [`chat_cancel`], which fires a
+/// `oneshot` token. `tokio::select!` races the stream against the
+/// cancel signal; when cancelled, the stream future is dropped, which
+/// drops the `reqwest::Response` and closes the HTTP connection.
 #[tauri::command]
 async fn chat_send_stream(
     messages: Vec<ChatMessage>,
     temperature: Option<f64>,
     on_token: tauri::ipc::Channel<String>,
-    state: tauri::State<'_, ProviderState>,
+    provider_state: tauri::State<'_, ProviderState>,
+    stream_state: tauri::State<'_, ChatStreamState>,
 ) -> Result<(), String> {
     let (provider, model) = {
-        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let store = provider_state.store.lock().map_err(|e| e.to_string())?;
 
         let active = store.get_active().map_err(|e| e.to_string())?;
         let active = active.ok_or(
@@ -430,16 +453,47 @@ async fn chat_send_stream(
     };
 
     let channel = Channel::from_tauri(on_token);
+    let temp = temperature.unwrap_or(0.7);
 
-    provider
-        .chat_stream(
-            &model,
-            &messages,
-            temperature.unwrap_or(0.7),
-            &channel,
-        )
-        .await
-        .map_err(|e| e.to_string())
+    // Register a cancellation token so `chat_cancel` can stop the stream.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut cancel = stream_state.cancel.lock().map_err(|e| e.to_string())?;
+        *cancel = Some(cancel_tx);
+    }
+
+    let result = tokio::select! {
+        result = provider.chat_stream(&model, &messages, temp, &channel) => {
+            result.map_err(|e| e.to_string())
+        }
+        _ = cancel_rx => {
+            // Graceful cancellation — the stream future is dropped here,
+            // which drops the reqwest::Response and closes the HTTP connection.
+            Ok(())
+        }
+    };
+
+    // Clear the cancel token — the stream is no longer active.
+    {
+        let mut cancel = stream_state.cancel.lock().map_err(|e| e.to_string())?;
+        *cancel = None;
+    }
+
+    result
+}
+
+/// Cancel the currently active chat stream, if any.
+///
+/// Returns `true` if a stream was cancelled, `false` if no stream was active.
+#[tauri::command]
+fn chat_cancel(stream_state: tauri::State<'_, ChatStreamState>) -> Result<bool, String> {
+    let mut cancel = stream_state.cancel.lock().map_err(|e| e.to_string())?;
+    if let Some(tx) = cancel.take() {
+        let _ = tx.send(());
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -470,6 +524,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::new(AppState::new()))
+        .manage(ChatStreamState::new())
         .invoke_handler(tauri::generate_handler![
             open_panel,
             close_panel,
@@ -484,6 +539,7 @@ fn main() {
             provider_test_connection,
             provider_chat_stream,
             chat_send_stream,
+            chat_cancel,
             active_provider_get,
             active_provider_set,
             active_provider_clear,
