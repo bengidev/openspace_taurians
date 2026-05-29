@@ -20,11 +20,65 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Classification of a provider test connection failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestConnectionErrorKind {
+    /// Authentication failed (HTTP 401/403).
+    Auth,
+    /// Network/transport failure (DNS, TLS, timeout, refused).
+    Network,
+    /// Provider configuration is incomplete or invalid (missing key, bad template).
+    InvalidConfig,
+    /// Provider returned an unexpected HTTP status.
+    HttpStatus,
+    /// Provider response could not be parsed or the configured response path is wrong.
+    MalformedResponse,
+    /// Catch-all for unclassified errors.
+    Unknown,
+}
+
+/// Error detail returned by `provider_test_connection`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTestError {
+    pub kind: TestConnectionErrorKind,
+    pub message: String,
+}
+
 /// Result returned by `provider_test_connection`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderTestResult {
     pub success: bool,
-    pub error: Option<String>,
+    pub error: Option<ProviderTestError>,
+}
+
+/// Classify an adapter error string into a [`TestConnectionErrorKind`].
+///
+/// The classification is based on the human-readable error messages produced
+/// by [`AiProviderError`]'s `Display` implementation.
+pub fn classify_test_error(message: &str) -> TestConnectionErrorKind {
+    let lower = message.to_lowercase();
+
+    if lower.contains("missing an api key") {
+        TestConnectionErrorKind::InvalidConfig
+    } else if lower.contains("encryption error") || lower.contains("invalid auth header") {
+        TestConnectionErrorKind::InvalidConfig
+    } else if lower.contains("http error: ")
+        && !lower.contains("returned http ")
+    {
+        TestConnectionErrorKind::Network
+    } else if lower.contains("returned http 401") || lower.contains("returned http 403") {
+        TestConnectionErrorKind::Auth
+    } else if lower.contains("returned http ") {
+        TestConnectionErrorKind::HttpStatus
+    } else if lower.contains("json error")
+        || lower.contains("response path")
+        || lower.contains("did not resolve to a string")
+    {
+        TestConnectionErrorKind::MalformedResponse
+    } else {
+        TestConnectionErrorKind::Unknown
+    }
 }
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -125,6 +179,10 @@ impl AiProvider {
     }
 
     /// Send a minimal chat request. Intended for `provider_test_connection`.
+    ///
+    /// On failure, the error is classified into a [`ProviderTestError`] with
+    /// a structured [`TestConnectionErrorKind`] so the UI can display an
+    /// actionable message.
     pub async fn test_connection(&self) -> ProviderTestResult {
         let model = self
             .config
@@ -142,10 +200,14 @@ impl AiProvider {
                 success: true,
                 error: None,
             },
-            Err(error) => ProviderTestResult {
-                success: false,
-                error: Some(error.to_string()),
-            },
+            Err(error) => {
+                let message = error.to_string();
+                let kind = classify_test_error(&message);
+                ProviderTestResult {
+                    success: false,
+                    error: Some(ProviderTestError { kind, message }),
+                }
+            }
         }
     }
 
@@ -750,5 +812,218 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["stream"], true);
+    }
+
+    // ── test_connection structured error tests ────────────────────
+
+    #[tokio::test]
+    async fn test_connection_returns_success_for_valid_provider() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "OK"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "secret-key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(result.success);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_missing_api_key_as_invalid_config() {
+        let provider = AiProvider::with_api_key(config("choices[0].message.content"), String::new());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::InvalidConfig);
+        assert!(error.message.contains("missing an API key"));
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_auth_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("Unauthorized"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "bad-key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::Auth);
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_403_as_auth_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("Forbidden"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "forbidden-key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::Auth);
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_server_error_as_http_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("Internal Server Error"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("choices[0].message.content");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::HttpStatus);
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_bad_response_path_as_malformed_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "OK"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut provider_config = config("nonexistent.path[0].value");
+        provider_config.base_url = format!("{}/chat/completions", server.uri());
+        let provider = AiProvider::with_api_key(provider_config, "key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::MalformedResponse);
+    }
+
+    #[tokio::test]
+    async fn test_connection_classifies_network_failure() {
+        // Use an unreachable URL to simulate a network failure.
+        let provider_config = config("choices[0].message.content");
+        // base_url points to a non-routable address.
+        let provider =
+            AiProvider::with_api_key(provider_config, "key".to_string());
+
+        let result = provider.test_connection().await;
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert_eq!(error.kind, TestConnectionErrorKind::Network);
+    }
+
+    // ── classify_test_error unit tests ────────────────────────────
+
+    #[test]
+    fn classify_missing_api_key() {
+        assert_eq!(
+            classify_test_error("provider 'OpenAI' is missing an API key"),
+            TestConnectionErrorKind::InvalidConfig,
+        );
+    }
+
+    #[test]
+    fn classify_encryption_error() {
+        assert_eq!(
+            classify_test_error("encryption error: decryption failed"),
+            TestConnectionErrorKind::InvalidConfig,
+        );
+    }
+
+    #[test]
+    fn classify_invalid_auth_header() {
+        assert_eq!(
+            classify_test_error("invalid auth header name 'bad': invalid"),
+            TestConnectionErrorKind::InvalidConfig,
+        );
+    }
+
+    #[test]
+    fn classify_http_401() {
+        assert_eq!(
+            classify_test_error("provider returned HTTP 401 Unauthorized: body"),
+            TestConnectionErrorKind::Auth,
+        );
+    }
+
+    #[test]
+    fn classify_http_403() {
+        assert_eq!(
+            classify_test_error("provider returned HTTP 403 Forbidden: body"),
+            TestConnectionErrorKind::Auth,
+        );
+    }
+
+    #[test]
+    fn classify_http_500() {
+        assert_eq!(
+            classify_test_error("provider returned HTTP 500 Internal Server Error: body"),
+            TestConnectionErrorKind::HttpStatus,
+        );
+    }
+
+    #[test]
+    fn classify_http_429() {
+        assert_eq!(
+            classify_test_error("provider returned HTTP 429 Too Many Requests: body"),
+            TestConnectionErrorKind::HttpStatus,
+        );
+    }
+
+    #[test]
+    fn classify_json_error() {
+        assert_eq!(
+            classify_test_error("json error: expected value at line 1 column 1"),
+            TestConnectionErrorKind::MalformedResponse,
+        );
+    }
+
+    #[test]
+    fn classify_response_path_error() {
+        assert_eq!(
+            classify_test_error("response path 'bad.path' did not resolve to a string"),
+            TestConnectionErrorKind::MalformedResponse,
+        );
+    }
+
+    #[test]
+    fn classify_unknown_error() {
+        assert_eq!(
+            classify_test_error("something unexpected happened"),
+            TestConnectionErrorKind::Unknown,
+        );
     }
 }
